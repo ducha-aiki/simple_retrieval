@@ -193,7 +193,11 @@ class SimpleRetrieval:
                             self.config['num_iter']
                         )
                         inliers = inliers > 0
-                        new_shortlist_scores.append(inliers.sum())
+                        num_inl = inliers.sum()
+                        new_shortlist_scores.append(num_inl)
+                        if num_inl>30:
+                            print (f"Found {num_inl} inliers in {fname}")
+                            print (H)
                     else:
                         raise NotImplementedError
         new_shortlist_scores = np.array(new_shortlist_scores)
@@ -216,9 +220,10 @@ def main():
     #query_fname = '/Users/oldufo/datasets/EVD/1/graf.png'
     query_fname = '/Users/oldufo/datasets/goose/IMG_3926.jpg'
     shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname)
-    print (shortlist_idxs, shortlist_scores)
+    print (shortlist_idxs, shortlist_scores)    
     q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
-    out = r.resort_shortlist(q_img, shortlist_idxs)
+    with torch.inference_mode():
+        out = r.resort_shortlist(q_img, shortlist_idxs)
     print(out)
 
 if __name__ == "__main__":
