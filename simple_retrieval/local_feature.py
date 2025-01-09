@@ -74,3 +74,59 @@ def detect_sift_single(img, num_feats=2048, resize_to=(800, 600)):
         lafs1[..., 1] *= hw1_new[0] / hw1[0]
     kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
     return kpts, descs1, lafs1
+
+
+def detect_xfeat_single(img, num_feats=2048, resize_to=(800, 600)):
+    device=torch.device('cpu')
+    from xfeat import XFeat
+    model = XFeat()
+    hw1 = torch.tensor(img.shape[:2])
+    if resize_to:
+        img = cv2.resize(img, resize_to)
+        hw1_new = torch.tensor(img.shape[:2], device=device)
+    res = model.detectAndCompute(K.image_to_tensor(img,None).float(), top_k=num_feats)
+    keypoints, descriptors = res[0]['keypoints'], res[0]['descriptors']
+    lafs1 = K.feature.laf_from_center_scale_ori(keypoints.reshape(1, -1, 2))
+    if resize_to:
+        lafs1[..., 0] *= hw1_new[1] / hw1[1]
+        lafs1[..., 1] *= hw1_new[0] / hw1[0]
+    kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
+    return kpts, descriptors, lafs1
+
+def detect_xfeat_dir(img_fnames,
+                segmentations=None,
+                num_feats=2048,
+                device=torch.device('cpu'),
+                feature_dir='.featureout', resize_to=(800, 600)):
+    from xfeat import XFeat
+    model = XFeat()
+    if not os.path.isdir(feature_dir):
+        os.makedirs(feature_dir)
+    with h5py.File(f'{feature_dir}/lafs.h5', mode='w') as f_laf, \
+            h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+            h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc:
+        for i, img_path in tqdm(enumerate(img_fnames)):
+            if segmentations is not None:
+                seg = cv2.imread(segmentations[i], cv2.IMREAD_GRAYSCALE)
+            else:
+                seg = None
+            img1 = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
+            hw1 = torch.tensor(img1.shape[:2], device=device)
+            if resize_to:
+                img1 = cv2.resize(img1, resize_to)
+                hw1_new = torch.tensor(img1.shape[:2], device=device)
+            #img_fname = img_path.split('/')[-1]
+            key = img_path
+            res = model.detectAndCompute(K.image_to_tensor(img1,None).float(), top_k=num_feats)
+            keypoints, descriptors = res[0]['keypoints'], res[0]['descriptors']
+            lafs1 = K.feature.laf_from_center_scale_ori(keypoints.reshape(1, -1, 2))
+            if resize_to:
+                lafs1[..., 0] *= hw1_new[1] / hw1[1]
+                lafs1[..., 1] *= hw1_new[0] / hw1[0]
+            desc_dim = descriptors.shape[-1]
+            kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
+            descriptors = descriptors.reshape(-1, desc_dim).detach().cpu().numpy()
+            f_laf[key] = lafs1.detach().cpu().numpy()
+            f_kp[key] = kpts
+            f_desc[key] = descriptors
+    return

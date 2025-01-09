@@ -17,12 +17,12 @@ from torch.utils.data import Dataset
 import h5py
 
 from simple_retrieval.global_feature import get_dinov2salad, get_input_transform
-from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir
+from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir
 import cv2
 
 
 def get_default_config():
-    conf = {"local_features": "sift",
+    conf = {"local_features": "xfeat",
             "global_features": "dinosalad",
             "inl_th": 5.0,
             "num_iter": 1000,
@@ -122,6 +122,8 @@ class SimpleRetrieval:
         fnames_list = self.ds.samples
         if self.config["local_features"] == "sift":
             detect_sift_dir(fnames_list, feature_dir=index_dir)
+        if self.config["local_features"] == "xfeat":
+            detect_xfeat_dir(fnames_list, feature_dir=index_dir)
         self.local_feature_dir=index_dir
         print (f"{self.config['local_features']} index of created from images in: {img_dir} in {time()-t:.2f} sec, saved to {index_dir}")
         return 
@@ -152,7 +154,7 @@ class SimpleRetrieval:
         dists = np.linalg.norm(self.global_descs - query, axis=1)
         idxs = np.argsort(dists)[:num_nn]
         print (f"Shortlist in: {time()-t:.2f} sec")
-        return idxs, 2-dists[idxs]
+        return idxs, (2-dists[idxs])/2.0
     
     def resort_shortlist(self, query, shortlist, criterion = 'num_inl'):
         # Placeholder function for retrieving data
@@ -173,10 +175,13 @@ class SimpleRetrieval:
                     hw2 = torch.tensor([wh2[1], wh2[0]])
                     descs2 = torch.from_numpy(f_desc[fname][...])
                     lafs2 = torch.from_numpy(f_laf[fname][...])
+                    tt=time()
                     dists, idxs = matcher(descs, descs2,
                                       lafs1,
                                       lafs2,  # Adalam takes into account also geometric information
                                       hw1=hw1, hw2=hw2)  # Adalam also benefits from knowing image size
+                    print (f"Matching in {time()-tt:.2f} sec")
+                    tt=time()
                     if criterion == 'num_inl':
                         kp1 = K.feature.get_laf_center(lafs1).reshape(-1, 2)
                         kp2 = K.feature.get_laf_center(lafs2).reshape(-1, 2)
@@ -200,6 +205,49 @@ class SimpleRetrieval:
                             print (H)
                     else:
                         raise NotImplementedError
+                    print (f"RANSAC in {time()-tt:.4f} sec")
+        if self.config["local_features"] == "xfeat":
+            kpt, descs, lafs1 = detect_xfeat_single(query)
+            with h5py.File(f'{self.local_feature_dir}/descriptors.h5', mode='r') as f_desc, \
+                h5py.File(f'{self.local_feature_dir}/lafs.h5', mode='r') as f_laf:
+                for i, idx in tqdm(enumerate(shortlist)):
+                    fname = self.ds.samples[idx]
+                    img = Image.open(fname).convert("RGB")
+                    wh2 = img.size
+                    hw2 = torch.tensor([wh2[1], wh2[0]])
+                    descs2 = torch.from_numpy(f_desc[fname][...])
+                    lafs2 = torch.from_numpy(f_laf[fname][...])
+                    tt=time()
+                    dists, idxs = matcher(descs, descs2,
+                                      lafs1,
+                                      lafs2,  # Adalam takes into account also geometric information
+                                      hw1=hw1, hw2=hw2)  # Adalam also benefits from knowing image size
+                    print (f"Matching in {time()-tt:.2f} sec")
+                    tt=time()
+                    if criterion == 'num_inl':
+                        kp1 = K.feature.get_laf_center(lafs1).reshape(-1, 2)
+                        kp2 = K.feature.get_laf_center(lafs2).reshape(-1, 2)
+                        mkpts1, mkpts2  = get_matching_keypoints(kp1, kp2, idxs)
+                        if len(mkpts1) < 5:
+                            new_shortlist_scores.append(0)
+                            continue
+                        H, inliers = cv2.findHomography(
+                            mkpts1.detach().cpu().numpy(),
+                            mkpts2.detach().cpu().numpy(),
+                            cv2.USAC_MAGSAC,
+                            self.config['inl_th'],
+                            0.999,
+                            self.config['num_iter']
+                        )
+                        inliers = inliers > 0
+                        num_inl = inliers.sum()
+                        new_shortlist_scores.append(num_inl)
+                        if num_inl>30:
+                            print (f"Found {num_inl} inliers in {fname}")
+                            print (H)
+                    else:
+                        raise NotImplementedError
+                    print (f"RANSAC in {time()-tt:.4f} sec")
         new_shortlist_scores = np.array(new_shortlist_scores)
         sorted_idxs = np.argsort(new_shortlist_scores)[::-1]
         print (sorted_idxs)
