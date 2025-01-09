@@ -40,10 +40,16 @@ def detect_sift_dir(img_fnames,
                 seg = None
             img1 = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
             hw1 = torch.tensor(img1.shape[:2], device=device)
+            if resize_to:
+                img1 = cv2.resize(img1, resize_to)
+                hw1_new = torch.tensor(img1.shape[:2], device=device)
             #img_fname = img_path.split('/')[-1]
             key = img_path
             kpts1, descs1 = sift.detectAndCompute(img1, seg)
             lafs1 = laf_from_opencv_SIFT_kpts(kpts1)
+            if resize_to:
+                lafs1[..., 0] *= hw1_new[1] / hw1[1]
+                lafs1[..., 1] *= hw1_new[0] / hw1[0]
             descs1 = sift_to_rootsift(torch.from_numpy(descs1)).to(device)
             desc_dim = descs1.shape[-1]
             kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
@@ -53,10 +59,18 @@ def detect_sift_dir(img_fnames,
             f_desc[key] = descs1
     return
 
-def detect_sift_single(img, num_feats=2048):
+def detect_sift_single(img, num_feats=2048, resize_to=(800, 600)):
     device=torch.device('cpu')
     sift = cv2.SIFT_create(num_feats, edgeThreshold=-1000, contrastThreshold=-1000)
+    hw1 = torch.tensor(img.shape[:2])
+    if resize_to:
+        img = cv2.resize(img, resize_to)
+        hw1_new = torch.tensor(img.shape[:2], device=device)
     kpts, descs = sift.detectAndCompute(img, None)
     descs1 = sift_to_rootsift(torch.from_numpy(descs)).to(device)
     lafs1 = laf_from_opencv_SIFT_kpts(kpts)
+    if resize_to:
+        lafs1[..., 0] *= hw1_new[1] / hw1[1]
+        lafs1[..., 1] *= hw1_new[0] / hw1[0]
+    kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
     return kpts, descs1, lafs1
