@@ -22,7 +22,7 @@ def sift_to_rootsift(x: torch.Tensor, eps=1e-6) -> torch.Tensor:
     return torch.nn.functional.normalize(x, p=2, dim=-1, eps=eps)
 
 
-def detect_sift(img_fnames,
+def detect_sift_dir(img_fnames,
                 segmentations=None,
                 num_feats=2048,
                 device=torch.device('cpu'),
@@ -40,8 +40,8 @@ def detect_sift(img_fnames,
                 seg = None
             img1 = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
             hw1 = torch.tensor(img1.shape[:2], device=device)
-            img_fname = img_path.split('/')[-1]
-            key = img_fname
+            #img_fname = img_path.split('/')[-1]
+            key = img_path
             kpts1, descs1 = sift.detectAndCompute(img1, seg)
             lafs1 = laf_from_opencv_SIFT_kpts(kpts1)
             descs1 = sift_to_rootsift(torch.from_numpy(descs1)).to(device)
@@ -52,3 +52,11 @@ def detect_sift(img_fnames,
             f_kp[key] = kpts
             f_desc[key] = descs1
     return
+
+def detect_sift_single(img, num_feats=2048):
+    device=torch.device('cpu')
+    sift = cv2.SIFT_create(num_feats, edgeThreshold=-1000, contrastThreshold=-1000)
+    kpts, descs = sift.detectAndCompute(img, None)
+    descs1 = sift_to_rootsift(torch.from_numpy(descs)).to(device)
+    lafs1 = laf_from_opencv_SIFT_kpts(kpts)
+    return kpts, descs1, lafs1
