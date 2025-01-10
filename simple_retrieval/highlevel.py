@@ -26,15 +26,15 @@ from kornia_moons.feature import kornia_matches_from_cv2
 def get_default_config():
     conf = {"local_features": "xfeat",
             "global_features": "dinosalad",
-            "inl_th": 5.0,
-            "num_iter": 1000,
+            "inl_th": 2.0,
+            "num_iter": 2000,
             "num_local_features": 4096,
             "local_desc_image_size": (1024,768),
             
             "global_desc_image_size": 448,
             "global_desc_batch_size": 2,
             "device": "mps",
-            "force_recache": True,
+            "force_recache": False,
             "ransac_type": "homography",
             "matching_method": "smnn",
             "num_nn": 100,
@@ -97,8 +97,12 @@ class SimpleRetrieval:
                                                         batch_size=self.config["global_desc_batch_size"],
                                                         device=self.config["device"],
                                                         num_workers=1)
+            print (self.global_descs[0])
             torch.save(self.global_descs, global_index_fname)
             print (f"Global index saved to:  {global_index_fname}")
+            self.global_descs = torch.load(global_index_fname)
+        print (self.global_descs[0])
+        print (self.global_descs.shape, self.global_descs.dtype)
         return 
 
     def create_local_descriptor_index(self, img_dir):
@@ -126,6 +130,7 @@ class SimpleRetrieval:
         dtype = torch.float16 if 'cuda' in str(self.config["device"]) else torch.float32
         t = time()
         model = self.global_model.to(dev, dtype)
+        model.eval()
         with torch.inference_mode():
             global_desc = model(self.global_transform(img)[None].to(dev, dtype)).cpu()
         print (f"Describe query in: {time()-t:.2f} sec")
@@ -223,7 +228,7 @@ class SimpleRetrieval:
             )
             inliers = inliers > 0
             num_inl = inliers.sum()
-            if num_inl>15:
+            if num_inl>20:
                 if criterion == 'num_inl':
                     new_shortlist_scores.append(num_inl)
                 elif criterion == 'scale_factor_min':
@@ -239,7 +244,6 @@ class SimpleRetrieval:
                     new_shortlist_scores.append(0)
                 #print (f"Found {num_inl} inliers in {fname}")
                 #print (H)
-
         print (f"RANSAC in {time()-tt:.4f} sec")
         new_shortlist_scores = np.array(new_shortlist_scores)
         sorted_idxs = np.argsort(new_shortlist_scores)[::-1]
@@ -249,15 +253,15 @@ def main():
     # Example usage of the retrieve_data function
     r = SimpleRetrieval()
     print (r)
-    #r.create_global_descriptor_index('/Users/oldufo/datasets/goose',
-    #                                 './tmp/global_desc')
-    #r.create_local_descriptor_index('/Users/oldufo/datasets/goose')
-    #query_fname = '/Users/oldufo/datasets/goose/goose1.png'
+    r.create_global_descriptor_index('/Users/oldufo/datasets/goose',
+                                     './tmp/global_desc')
+    r.create_local_descriptor_index('/Users/oldufo/datasets/goose')
+    query_fname = '/Users/oldufo/datasets/goose/goose1.png'
     
-    r.create_global_descriptor_index('/Users/oldufo/datasets/oxford5k',
-                                     './tmp/global_desc_ox5k')
-    r.create_local_descriptor_index('/Users/oldufo/datasets/oxford5k')
-    query_fname = '/Users/oldufo/datasets/oxford5k/all_souls_000006.jpg'
+    #r.create_global_descriptor_index('/Users/oldufo/datasets/oxford5k',
+    #                                 './tmp/global_desc_ox5k')
+    #r.create_local_descriptor_index('/Users/oldufo/datasets/oxford5k')
+    #query_fname = '/Users/oldufo/datasets/oxford5k/all_souls_000006.jpg'
 
     #query_fname = '/Users/oldufo/datasets/EVD/1/graf.png'
     

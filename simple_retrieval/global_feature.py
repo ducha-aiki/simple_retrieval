@@ -236,6 +236,18 @@ def get_input_transform(image_size=None):
             T.Normalize(mean=MEAN, std=STD)
         ])
 
+class SimpleDINOSALAD(nn.Module):
+    def __init__(self, model, aggregator):
+        super().__init__()
+        self.backbone = model
+        self.aggregator = aggregator
+        self.backbone.eval()
+        self.aggregator.eval()
+    
+    def forward(self, x):
+        x = self.backbone(x)
+        return self.aggregator(x)
+
 def get_dinov2salad(device='cpu', dtype=torch.float32):
     """
     This function returns a DINOv2 + SALAD model.
@@ -253,8 +265,10 @@ def get_dinov2salad(device='cpu', dtype=torch.float32):
             'token_dim': 256,
         }
     salad = SALAD(**agg_config).eval()
-    model = nn.Sequential(dino, salad).to(device=device, dtype=dtype)
+    model = SimpleDINOSALAD(dino, salad)
+    model.load_state_dict(torch.load('dino_salad.ckpt', map_location=torch.device('cpu')))
     model.eval()
+    model=model.to(device=device, dtype=dtype)
     return model
 
 
@@ -264,6 +278,7 @@ def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_w
     dev = device
     dtype = torch.float16 if 'cuda' in str(device) else torch.float32
     bs = batch_size
+    model.eval()
     dl = DataLoader(ds, batch_size=bs, num_workers=num_workers)
     with torch.inference_mode():
         for img, _ in tqdm(dl):
