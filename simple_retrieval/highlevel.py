@@ -28,18 +28,32 @@ def get_default_config():
             "global_features": "dinosalad",
             "inl_th": 5.0,
             "num_iter": 1000,
-            "num_local_features": 1024,
-            "global_desc_image_size": 392,
+            "num_local_features": 4096,
+            "local_desc_image_size": (1024,768),
+            
+            "global_desc_image_size": 448,
             "global_desc_batch_size": 2,
             "device": "mps",
-            "force_recache": False,
+            "force_recache": True,
             "ransac_type": "homography",
             "matching_method": "smnn",
             "num_nn": 100,
             "use_diffusion": False,
-            "resort_criterion": "num_inl"}
+            "resort_criterion": "scale_factor_max"}
     return conf
     
+def get_scale_factor(H):
+    # Normalize the Homography matrix
+    H = H / H[2, 2]
+    # Extract the 2x2 linear transformation part
+    A = H[:2, :2]
+    # Compute SVD of H_2x2
+    U, S, Vt = np.linalg.svd(A)
+    # Singular values are in S
+    sigma1, sigma2 = S
+    # Compute the scale factor as the geometric mean
+    scale_factor = np.sqrt(sigma1 * sigma2)
+    return scale_factor
 
 class SimpleRetrieval:
     def __init__(self, img_dir=None, index_dir=None, config = get_default_config()):
@@ -94,9 +108,14 @@ class SimpleRetrieval:
         if (not os.path.exists(os.path.join(self.local_feature_dir, 'descriptors.h5'))) or (self.config["force_recache"]):
             fnames_list = self.ds.samples
             if self.config["local_features"] == "sift":
-                detect_sift_dir(fnames_list, feature_dir=self.local_feature_dir)
+                detect_sift_dir(fnames_list, feature_dir=self.local_feature_dir, num_feats=self.config["num_local_features"], device=self.config["device"],
+                                resize_to=self.config["local_desc_image_size"])
             if self.config["local_features"] == "xfeat":
-                detect_xfeat_dir(fnames_list, feature_dir=self.local_feature_dir, device=self.config["device"])
+                detect_xfeat_dir(fnames_list,
+                                 feature_dir=self.local_feature_dir,
+                                 num_feats=self.config["num_local_features"],
+                                 resize_to=self.config["local_desc_image_size"],
+                                 device=self.config["device"])
             print (f"{self.config['local_features']} index of created from images in: {img_dir} in {time()-t:.2f} sec, saved to {self.local_feature_dir}")
         else:
             print (f"Local index already exists in {self.local_feature_dir}")
@@ -104,7 +123,7 @@ class SimpleRetrieval:
 
     def describe_query(self, img):
         dev = torch.device(self.config["device"])
-        dtype = torch.float16 if 'cuda' in self.config["device"] else torch.float32
+        dtype = torch.float16 if 'cuda' in str(self.config["device"]) else torch.float32
         t = time()
         model = self.global_model.to(dev, dtype)
         with torch.inference_mode():
@@ -126,6 +145,7 @@ class SimpleRetrieval:
         t=time()
         dists = np.linalg.norm(self.global_descs - query, axis=1)
         idxs = np.argsort(dists)[:num_nn]
+        print (f"Distances: {dists[idxs]}")
         print (f"Shortlist in: {time()-t:.2f} sec")
         return idxs, (2-dists[idxs])/2.0
     
@@ -139,9 +159,13 @@ class SimpleRetrieval:
         matching_keypoints = []
 
         if self.config["local_features"] == "sift":
-            kpt, descs, lafs1 = detect_sift_single(query)
+            kpt, descs, lafs1 = detect_sift_single(query,
+                                                   num_feats=self.config["num_local_features"],
+                                                   resize_to=self.config["local_desc_image_size"])
         if self.config["local_features"] == "xfeat":
-            kpt, descs, lafs1 = detect_xfeat_single(query)
+            kpt, descs, lafs1 = detect_xfeat_single(query,
+                                                    num_feats=self.config["num_local_features"],
+                                                    resize_to=self.config["local_desc_image_size"])
         if matching_method == 'flann':
             FLANN_INDEX_KDTREE = 1  # FLANN_INDEX_KDTREE
             index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=2)
@@ -199,20 +223,27 @@ class SimpleRetrieval:
             )
             inliers = inliers > 0
             num_inl = inliers.sum()
-            new_shortlist_scores.append(num_inl)
-            if num_inl>30:
-                pass
+            if num_inl>15:
+                if criterion == 'num_inl':
+                    new_shortlist_scores.append(num_inl)
+                elif criterion == 'scale_factor_min':
+                    scale_factor = get_scale_factor(H)
+                    new_shortlist_scores.append(1.0/scale_factor)
+                elif criterion == 'scale_factor_max':
+                    scale_factor = get_scale_factor(H)
+                    new_shortlist_scores.append(scale_factor)
+            else:
+                if criterion == 'num_inl':
+                    new_shortlist_scores.append(num_inl)
+                else:
+                    new_shortlist_scores.append(0)
                 #print (f"Found {num_inl} inliers in {fname}")
                 #print (H)
 
         print (f"RANSAC in {time()-tt:.4f} sec")
         new_shortlist_scores = np.array(new_shortlist_scores)
         sorted_idxs = np.argsort(new_shortlist_scores)[::-1]
-        print (sorted_idxs)
         return shortlist[sorted_idxs], new_shortlist_scores[sorted_idxs]
-
-
-
 
 def main():
     # Example usage of the retrieve_data function
@@ -221,18 +252,22 @@ def main():
     #r.create_global_descriptor_index('/Users/oldufo/datasets/goose',
     #                                 './tmp/global_desc')
     #r.create_local_descriptor_index('/Users/oldufo/datasets/goose')
+    #query_fname = '/Users/oldufo/datasets/goose/goose1.png'
+    
     r.create_global_descriptor_index('/Users/oldufo/datasets/oxford5k',
                                      './tmp/global_desc_ox5k')
     r.create_local_descriptor_index('/Users/oldufo/datasets/oxford5k')
-    
+    query_fname = '/Users/oldufo/datasets/oxford5k/all_souls_000006.jpg'
+
     #query_fname = '/Users/oldufo/datasets/EVD/1/graf.png'
-    query_fname = '/Users/oldufo/datasets/goose/IMG_3926.jpg'
+    
     shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname, num_nn=r.config["num_nn"])
-    print (shortlist_idxs, shortlist_scores)    
+    fnames = r.ds.samples  
     q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
     with torch.inference_mode():
-        out = r.resort_shortlist(q_img, shortlist_idxs, matching_method=r.config["matching_method"])
-    print(out)
+        idxs, scores = r.resort_shortlist(q_img, shortlist_idxs, matching_method=r.config["matching_method"],
+                                 criterion=r.config["resort_criterion"])
+    print ([fnames[i] for i in idxs], scores)  
 
 if __name__ == "__main__":
     main()

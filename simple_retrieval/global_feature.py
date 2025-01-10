@@ -39,7 +39,7 @@ class DINOv2(nn.Module):
         super().__init__()
 
         assert model_name in DINOV2_ARCHS.keys(), f'Unknown model name {model_name}'
-        self.model = torch.hub.load('facebookresearch/dinov2', model_name)
+        self.model = torch.hub.load('facebookresearch/dinov2', model_name).eval()
         self.num_channels = DINOV2_ARCHS[model_name]
         self.num_trainable_blocks = num_trainable_blocks
         self.norm_layer = norm_layer
@@ -57,7 +57,6 @@ class DINOv2(nn.Module):
             f (torch.Tensor): The feature map [B, C, H // 14, W // 14].
             t (torch.Tensor): The token [B, C]. This is only returned if return_token is True.
         """
-
         B, C, H, W = x.shape
 
         x = self.model.prepare_tokens_with_masks(x)
@@ -253,8 +252,10 @@ def get_dinov2salad(device='cpu', dtype=torch.float32):
             'cluster_dim': 128,
             'token_dim': 256,
         }
-    salad = SALAD(**agg_config)
-    return nn.Sequential(dino, salad).to(device=device, dtype=dtype)
+    salad = SALAD(**agg_config).eval()
+    model = nn.Sequential(dino, salad).to(device=device, dtype=dtype)
+    model.eval()
+    return model
 
 
 def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_workers=1):
