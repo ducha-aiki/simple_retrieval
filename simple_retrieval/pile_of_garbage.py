@@ -36,10 +36,10 @@ class CustomImageFolder(Dataset):
         """Indexes all valid image files in the directory and its subdirectories."""
         images = []
         for root, _, files in os.walk(self.root):
-            for file in sorted(files):
+            for file in files:
                 if self._is_valid_file(file):
                     images.append(os.path.join(root, file))
-        return images
+        return sorted(images)
 
     def __len__(self) -> int:
         """Returns the number of samples."""
