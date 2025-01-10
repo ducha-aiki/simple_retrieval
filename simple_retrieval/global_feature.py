@@ -4,6 +4,12 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torchvision.transforms as T
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
+
+from time import time
+from tqdm import tqdm
+from simple_retrieval.pile_of_garbage import CustomImageFolder
 
 DINOV2_ARCHS = {
     'dinov2_vits14': 384,
@@ -249,3 +255,19 @@ def get_dinov2salad(device='cpu', dtype=torch.float32):
         }
     salad = SALAD(**agg_config)
     return nn.Sequential(dino, salad).to(device=device, dtype=dtype)
+
+
+def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_workers=1):
+    global_desc = []
+    t = time()
+    dev = device
+    dtype = torch.float16 if 'cuda' in str(device) else torch.float32
+    bs = batch_size
+    dl = DataLoader(ds, batch_size=bs, num_workers=num_workers)
+    with torch.inference_mode():
+        for img, _ in tqdm(dl):
+            global_desc.append(model(img.to(dev)).cpu())
+    # Placeholder function for creating a global descriptor index
+    global_descs = np.concatenate(global_desc, axis=0)
+    print (f"{len(global_descs)} global descs in {time()-t:.2f} sec")
+    return global_descs
