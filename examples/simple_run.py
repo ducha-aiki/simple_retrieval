@@ -24,13 +24,24 @@ def main(config=None, input_dir=None, global_desc_dir=None, local_desc_dir=None,
     #query_fname = '/Users/oldufo/datasets/oxford5k/all_souls_000006.jpg'
     #query_fname = '/Users/oldufo/datasets/EVD/1/graf.png'
     
-    shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname, num_nn=r.config["num_nn"])
+    shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname, num_nn=r.config["num_nn"], manifold_diffusion=r.config["use_diffusion"])
     fnames = r.ds.samples  
     q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
     with torch.inference_mode():
         idxs, scores = r.resort_shortlist(q_img, shortlist_idxs, matching_method=r.config["matching_method"],
                                  criterion=r.config["resort_criterion"], device=r.config["device"])
-    print ([fnames[i] for i in idxs[:10]], scores[:10])  
+    print ([fnames[i] for i in idxs[:10]], scores[:10])
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(5, 5, figsize=(20, 20))
+    ax[0, 0].imshow(q_img)
+    ax[0, 0].set_title('Query ' + r.config["resort_criterion"])	
+    for i in range(24):
+        j=i+1
+        img = cv2.cvtColor(cv2.imread(fnames[idxs[i]]), cv2.COLOR_BGR2RGB)
+        ax[j//5, j%5].imshow(img)
+        ax[j//5, j%5].axis('off')
+        ax[j//5, j%5].set_title(f'{scores[i]:.2f}')
+    plt.show()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Simple retrieval example')
@@ -38,14 +49,13 @@ if __name__ == "__main__":
                         help='Directory containing images')
     parser.add_argument('--query_fname', type=str, 
                         help='Query image filename')
-    
     parser.add_argument('--global_desc_dir', type=str, default='./tmp/global_desc')
+    parser.add_argument('--use_diffusion',  action='store_true')
     parser.add_argument('--local_desc_dir', type=str, default='./tmp/local_desc')
     parser.add_argument('--resort_criterion', type=str, default='scale_factor_max', choices=['scale_factor_max', 'scale_factor_min', 'num_inliers'])	
     parser.add_argument('--num_nn', type=int, default=10)
     parser.add_argument('--inl_th', type=float, default=3.0)
     parser.add_argument('--device', type=str, default='cpu')
-
     parser.add_argument('--force_recache', action='store_true')
     parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--global_desc_batch_size', type=int, default=4)
