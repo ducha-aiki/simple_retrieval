@@ -109,3 +109,29 @@ def collate_with_string(batch):
     string_batch = strings
 
     return image_batch, heights_batch, widths_batch, string_batch
+
+def no_collate(batch):
+    # Unpack the batch into separate lists
+    return  zip(*batch)
+
+
+
+class H5LocalFeatureDataset(torch.utils.data.Dataset):
+    def __init__(self, dir_path, fnames_list=[]):
+        self.dir_path = dir_path
+        self.descriptors_dataset = None
+        self.lafs_dataset = None
+        self.hw_dataset = None
+        self.fname_list = fnames_list
+        self.dataset_len = len(fnames_list)
+
+    def __getitem__(self, index):
+        key = self.fname_list[index]
+        if self.descriptors_dataset is None:
+            self.descriptors_dataset = h5py.File(os.path.join(self.dir_path, "descriptors.h5"), 'r')
+            self.lafs_dataset = h5py.File(os.path.join(self.dir_path, "lafs.h5"), 'r')
+            self.hw_dataset = h5py.File(os.path.join(self.dir_path, "hw.h5"), 'r')
+        return torch.from_numpy(self.descriptors_dataset[key][...]), torch.from_numpy(self.lafs_dataset[key][...]), torch.from_numpy(self.hw_dataset[key][...]), key
+
+    def __len__(self):
+        return self.dataset_len

@@ -8,11 +8,11 @@ from tqdm import tqdm
 import numpy as np
 import kornia.feature as KF
 from kornia_moons.feature import laf_from_opencv_SIFT_kpts
-from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string
+from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset
 from simple_retrieval.xfeat import XFeat
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
-
+from kornia_moons.feature import kornia_matches_from_cv2
 
 def load_torch_image(fname, device=torch.device('cpu')):
     img = K.image_to_tensor(cv2.imread(fname), False).float() / 255.
@@ -155,3 +155,118 @@ def get_matching_keypoints(kp1, kp2, idxs):
     mkpts1 = kp1[idxs[:, 0]]
     mkpts2 = kp2[idxs[:, 1]]
     return mkpts1, mkpts2
+
+def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_method='smnn', device=torch.device('cpu')):
+    dtype = torch.float16 if 'cuda' in str(device) else torch.float32
+    matching_keypoints=[]
+    if matching_method == 'flann':
+        FLANN_INDEX_KDTREE = 1  # FLANN_INDEX_KDTREE
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=2)
+        search_params = dict(checks=32)  # or pass empty dictionary
+        flann = cv2.FlannBasedMatcher(index_params, search_params)
+        flann.add([query_desc.detach().float().cpu().numpy()])
+    elif matching_method == 'faiss_gpu':
+        import faiss
+        res = faiss.StandardGpuResources()
+        temp_index = faiss.IndexFlatL2(query_desc.shape[-1])
+        index = faiss.index_cpu_to_gpu(res, 0, temp_index)
+        index.add(query_desc.detach().float().cpu().numpy())
+        print ("faiss index created")
+    elif matching_method == 'faiss_cpu':
+        import faiss
+        index = faiss.IndexFlatL2(query_desc.shape[-1])
+        index.add(query_desc.detach().float().cpu().numpy())
+        print ("faiss CPU index created")
+    shortlist_local_feature_dataset = H5LocalFeatureDataset(db_dir, fnames)
+    lf_data_loader = DataLoader(shortlist_local_feature_dataset, batch_size=16, num_workers=2, collate_fn=no_collate)
+    for descs2_batch, lafs2_batch, hw2_batch, fnames_batch in tqdm(lf_data_loader):
+        for i in range(len(fnames_batch)):
+            descs2 = descs2_batch[i]
+            lafs2 = lafs2_batch[i]
+            hw2 = hw2_batch[i]
+            fname = fnames_batch[i]
+            if matching_method == 'adalam':
+                dists, idxs = K.feature.match_adalam(query_desc, descs2.to(device, dtype),
+                                query_laf,
+                                lafs2.to(device, dtype),  # Adalam takes into account also geometric information
+                                hw1=query_hw, hw2=hw2.to(device, dtype))  # Adalam also benefits from knowing image size
+            elif matching_method == 'smnn':
+                matcher = K.feature.match_smnn
+                dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.99)
+            elif matching_method == 'snn':
+                matcher = K.feature.match_snn
+                dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.9)
+            elif matching_method in ['faiss_gpu', 'faiss_cpu']:	
+                D, I = index.search(descs2.cpu().numpy(), 2)
+                idxs = torch.from_numpy(I[:, 0])
+                snn_ratio = D[:, 0] / (1e-8 + D[:, 1])
+                idxs = torch.cat([idxs.reshape(-1, 1), torch.arange(len(idxs)).reshape(-1, 1)], dim=1)
+                mask = snn_ratio <=  0.9
+                idxs = idxs[mask]
+            elif matching_method == 'flann':
+                matches = flann.knnMatch(descs2.float().numpy(), k=2)
+                valid_matches = []
+                for cur_match in matches:
+                    tmp_valid_matches = [
+                        nn_1 for nn_1, nn_2 in zip(cur_match[:-1], cur_match[1:])
+                        if nn_1.distance <= 0.9 * nn_2.distance
+                    ]
+                    valid_matches.extend(tmp_valid_matches)
+                dists, idxs = kornia_matches_from_cv2(valid_matches)
+                idxs = idxs.flip(1)
+            else:
+                raise NotImplementedError
+            kp1 = K.feature.get_laf_center(query_laf).reshape(-1, 2)
+            kp2 = K.feature.get_laf_center(lafs2).reshape(-1, 2)
+            mkpts1, mkpts2  = get_matching_keypoints(kp1, kp2, idxs.cpu())
+            matching_keypoints.append((mkpts1, mkpts2))
+    return matching_keypoints
+
+
+def get_scale_factor(H):
+    # Normalize the Homography matrix
+    H = H / H[2, 2]
+    # Extract the 2x2 linear transformation part
+    A = H[:2, :2]
+    # Compute SVD of H_2x2
+    U, S, Vt = np.linalg.svd(A)
+    # Singular values are in S
+    sigma1, sigma2 = S
+    # Compute the scale factor as the geometric mean
+    scale_factor = np.sqrt(sigma1 * sigma2)
+    return scale_factor
+
+
+def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th": 3.0, "num_iter": 1000}):
+    new_shortlist_scores = []
+    for i, idx in tqdm(enumerate(matching_keypoints)):
+        mkpts1, mkpts2 = matching_keypoints[i]
+        if len(mkpts1) < 5:
+            new_shortlist_scores.append(0)
+            continue
+        H, inliers = cv2.findHomography(
+            mkpts1.detach().cpu().numpy(),
+            mkpts2.detach().cpu().numpy(),
+            cv2.USAC_MAGSAC,
+            config['inl_th'],
+            0.999,
+            config['num_iter']
+        )
+        inliers = inliers > 0
+        num_inl = inliers.sum()
+        if num_inl>20:
+            if criterion == 'num_inliers':
+                new_shortlist_scores.append(num_inl)
+            elif criterion == 'scale_factor_min':
+                scale_factor = get_scale_factor(H)
+                new_shortlist_scores.append(1.0/scale_factor)
+            elif criterion == 'scale_factor_max':
+                scale_factor = get_scale_factor(H)
+                new_shortlist_scores.append(scale_factor)
+        else:
+            if criterion == 'num_inliers':
+                new_shortlist_scores.append(num_inl)
+            else:
+                new_shortlist_scores.append(0)
+    new_shortlist_scores = np.array(new_shortlist_scores)
+    return new_shortlist_scores
