@@ -16,7 +16,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 import h5py
 
-from simple_retrieval.global_feature import get_dinov2salad, get_input_transform, dataset_inference
+from simple_retrieval.global_feature import get_dinov2salad, get_input_transform_siglip, get_input_transform_dinosalad, dataset_inference, siglip2
 from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir, match_query_to_db, spatial_scoring
 from simple_retrieval.pile_of_garbage import CustomImageFolder
 from simple_retrieval.manifold_diffusion import sim_kernel, normalize_connection_graph, topK_W, cg_diffusion
@@ -52,9 +52,13 @@ class SimpleRetrieval:
         self.config = config
         dev = torch.device(self.config["device"])
         dtype = torch.float16 if 'cuda' in self.config["device"] else torch.float32
-        self.global_model = get_dinov2salad(device=dev, dtype=dtype).eval()
         img_size = self.config["global_desc_image_size"]
-        self.global_transform = get_input_transform((img_size, img_size))
+        if config.get("global_features") == "dinosalad":
+            self.global_model = get_dinov2salad(device=dev, dtype=dtype).eval()
+            self.global_transform = get_input_transform_dinosalad((img_size, img_size))
+        else:
+            self.global_model  = siglip2(device=dev).eval()
+            self.global_transform = get_input_transform_siglip((384, 384))
         return
     
     def __repr__(self):
@@ -65,7 +69,10 @@ class SimpleRetrieval:
         return f"./tmp/{img_dir.replace('/', '_')}"
     
     def get_global_index_fname(self, img_dir):
-        return os.path.join(self.get_cache_dir_name(img_dir), "global_index.pth")
+        return os.path.join(self.get_cache_dir_name(img_dir), f"{self.config['global_features']}_global_index.pth")
+    
+    def get_global_index_Wn_name(self, img_dir):
+        return os.path.join(self.get_cache_dir_name(img_dir),  f"{self.config['global_features']}_'Wn'.pth")
 
     def get_local_feature_dir(self, img_dir):
         local_desc_name = f"{self.config['local_features']}_{self.config['num_local_features']}"
@@ -77,9 +84,12 @@ class SimpleRetrieval:
         os.makedirs(index_dir, exist_ok=True)
         self.ds = CustomImageFolder(img_dir, transform=self.global_transform)
         global_index_fname = self.get_global_index_fname(img_dir)
+        Wn_fname = self.get_global_index_Wn_name(img_dir)
+        
         if os.path.exists(global_index_fname) and not self.config["force_recache"]:
             print (f"Loading global index from {global_index_fname}")
             self.global_descs = torch.load(global_index_fname)
+           
         else:
             print (f"Creating global index from images in: {img_dir}")
             self.global_descs = dataset_inference(self.global_model,
@@ -87,13 +97,24 @@ class SimpleRetrieval:
                                                         batch_size=self.config["global_desc_batch_size"],
                                                         device=self.config["device"],
                                                         num_workers=self.config["num_workers"])
-            print (self.global_descs[0])
             torch.save(self.global_descs, global_index_fname)
             print (f"Global index saved to:  {global_index_fname}")
             self.global_descs = torch.load(global_index_fname)
+        if os.path.exists(Wn_fname) and not self.config["force_recache"]:
+            self.Wn = torch.load(Wn_fname)
+        else:
+            print(self.global_descs.shape)
+            self.Wn = None#self.get_Wn(self.global_descs.T, K = 100)
+            #torch.save(self.Wn, Wn_fname)
         print (self.global_descs[0])
         print (self.global_descs.shape, self.global_descs.dtype)
         return 
+
+    def get_Wn(self, X, K = 100):
+        W = sim_kernel(np.dot(X.T, X))
+        W = topK_W(W, K)
+        Wn = normalize_connection_graph(W)
+        return Wn
 
     def create_local_descriptor_index(self, img_dir):
         # Placeholder function for creating a local descriptor index
@@ -129,7 +150,7 @@ class SimpleRetrieval:
         print (f"Describe query in: {time()-t:.2f} sec")
         return global_desc.reshape(1, -1).detach().cpu().numpy()
     
-    def get_shortlist(self, query_fname, num_nn = 1000, manifold_diffusion=False):
+    def get_shortlist(self, query_fname, num_nn = 1000, manifold_diffusion=False, Wn=None):
         """Returns a shortlist of images based on the global similarity query image.
         Args:
             query_fname (str): The filename of the query image.
@@ -153,10 +174,10 @@ class SimpleRetrieval:
             sortidxs = np.argsort(-qsim, axis = 1)
             for i in range(len(qsim)):
                 qsim[i,sortidxs[i,QUERYKNN:]] = 0
-            A = np.dot(X.T, X)
-            W = sim_kernel(A).T
-            W = topK_W(W, K)
-            Wn = normalize_connection_graph(W)
+            if Wn is None:
+                W = sim_kernel(np.dot(X.T, X))
+                W = topK_W(W, K)
+                Wn = normalize_connection_graph(W)
             cg_sims = cg_diffusion(qsim, Wn, alpha)
             dists = -cg_sims.reshape(-1)
         else:
