@@ -402,11 +402,9 @@ class XFeat(nn.Module):
             else:
                 raise RuntimeError('For numpy arrays, only (H,W) or (H,W,C) format is supported.')
         
-        
         if len(x.shape) != 4:
             raise RuntimeError('Input tensor needs to be in (B,C,H,W) format')
-    
-        x = x.to(self.dev).float()
+        #x = x.to(self.dev).float()
 
         H, W = x.shape[-2:]
         _H, _W = (H//32) * 32, (W//32) * 32

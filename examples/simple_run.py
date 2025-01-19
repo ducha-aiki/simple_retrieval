@@ -30,7 +30,7 @@ def main(config=None, input_dir=None, global_desc_dir=None, local_desc_dir=None,
     with torch.inference_mode():
         idxs, scores = r.resort_shortlist(q_img, shortlist_idxs, matching_method=r.config["matching_method"],
                                  criterion=r.config["resort_criterion"], device=r.config["device"])
-    print ([fnames[i] for i in idxs], scores)  
+    print ([fnames[i] for i in idxs[:10]], scores[:10])  
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Simple retrieval example')
@@ -43,7 +43,9 @@ if __name__ == "__main__":
     parser.add_argument('--local_desc_dir', type=str, default='./tmp/local_desc')
     parser.add_argument('--resort_criterion', type=str, default='scale_factor_max', choices=['scale_factor_max', 'scale_factor_min', 'num_inliers'])	
     parser.add_argument('--num_nn', type=int, default=10)
+    parser.add_argument('--inl_th', type=float, default=3.0)
     parser.add_argument('--device', type=str, default='cpu')
+
     parser.add_argument('--force_recache', action='store_true')
     parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--global_desc_batch_size', type=int, default=4)
