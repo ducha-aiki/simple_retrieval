@@ -9,6 +9,7 @@ import numpy as np
 import kornia.feature as KF
 from kornia_moons.feature import laf_from_opencv_SIFT_kpts
 from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string
+from simple_retrieval.xfeat import XFeat
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 
@@ -89,7 +90,6 @@ def detect_sift_single(img, num_feats=2048, resize_to=(800, 600)):
 
 def detect_xfeat_single(img, num_feats=2048, resize_to=(800, 600)):
     device=torch.device('cpu')
-    from xfeat import XFeat
     model = XFeat()
     hw1 = torch.tensor(img.shape[:2])
     if resize_to:
@@ -108,22 +108,25 @@ def detect_xfeat_single(img, num_feats=2048, resize_to=(800, 600)):
 def detect_xfeat_dir(img_fnames,
                 num_feats=2048,
                 device=torch.device('cpu'),
-                feature_dir='.featureout', resize_to=(600, 800)):
-    from xfeat import XFeat
+                feature_dir='.featureout', resize_to=(600, 800),
+                num_workers=1,
+                batch_size=1,
+                pin_memory=False):
+
     model = XFeat()
     if not os.path.isdir(feature_dir):
         os.makedirs(feature_dir)
-
     ds = CustomImageFolderFromFileList(img_fnames,
                                        transform=get_input_xfeat_transform(resize_to))
     dev = device
     dtype = torch.float16 if 'cuda' in str(device) else torch.float32
-    bs = 1
+    bs = batch_size
     dl = DataLoader(ds,
                     batch_size=bs,
-                    num_workers=1,
-                    collate_fn=collate_with_string,
-                    persistent_workers=False, pin_memory = False)
+                    num_workers=num_workers,
+                    collate_fn=collate_with_string, 
+                    persistent_workers=True, pin_memory = pin_memory)
+    model = model.to(device, dtype)
     with torch.inference_mode():
         with h5py.File(f'{feature_dir}/lafs.h5', mode='w') as f_laf, \
                 h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \

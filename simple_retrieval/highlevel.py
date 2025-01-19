@@ -30,10 +30,11 @@ def get_default_config():
             "num_iter": 2000,
             "num_local_features": 4096,
             "local_desc_image_size": (1024,768),
-            
+            "local_desc_batch_size": 2,
+            "num_workers": 1,
             "global_desc_image_size": 448,
             "global_desc_batch_size": 2,
-            "device": "mps",
+            "device": "cpu",
             "force_recache": False,
             "ransac_type": "homography",
             "matching_method": "smnn",
@@ -96,7 +97,7 @@ class SimpleRetrieval:
                                                         self.ds,
                                                         batch_size=self.config["global_desc_batch_size"],
                                                         device=self.config["device"],
-                                                        num_workers=1)
+                                                        num_workers=self.config["num_workers"])
             print (self.global_descs[0])
             torch.save(self.global_descs, global_index_fname)
             print (f"Global index saved to:  {global_index_fname}")
@@ -119,7 +120,10 @@ class SimpleRetrieval:
                                  feature_dir=self.local_feature_dir,
                                  num_feats=self.config["num_local_features"],
                                  resize_to=self.config["local_desc_image_size"],
-                                 device=self.config["device"])
+                                 device=self.config["device"],
+                                 batch_size=self.config["local_desc_batch_size"],
+                                 num_workers=self.config["num_workers"],
+                                 pin_memory=False)
             print (f"{self.config['local_features']} index of created from images in: {img_dir} in {time()-t:.2f} sec, saved to {self.local_feature_dir}")
         else:
             print (f"Local index already exists in {self.local_feature_dir}")
@@ -157,12 +161,12 @@ class SimpleRetrieval:
     def resort_shortlist(self, query, shortlist, criterion = 'num_inl', device='cpu', matching_method='smnn'):
         # Placeholder function for retrieving data
         ### First, we need to get the local descriptors of the query image
-        assert matching_method in ['adalam', 'smnn', 'flann']
+        assert matching_method in ['adalam', 'smnn', 'flann', 'faiss_gpu']	
         import kornia as K
         hw1 = torch.tensor(query.shape[:2])
         new_shortlist_scores = []
         matching_keypoints = []
-
+        dtype = torch.float16 if 'cuda' in str(device) else torch.float32
         if self.config["local_features"] == "sift":
             kpt, descs, lafs1 = detect_sift_single(query,
                                                    num_feats=self.config["num_local_features"],
@@ -176,7 +180,14 @@ class SimpleRetrieval:
             index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=2)
             search_params = dict(checks=32)  # or pass empty dictionary
             flann = cv2.FlannBasedMatcher(index_params, search_params)
-            flann.add([descs.detach().cpu().numpy()])
+            flann.add([descs.detach().float().cpu().numpy()])
+        elif matching_method == 'faiss_gpu':
+            import faiss
+            res = faiss.StandardGpuResources()
+            index = faiss.IndexFlatL2(descs.shape[-1])
+            gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
+            gpu_index.add(descs.detach().float().cpu().numpy())
+            print ("faiss index created")
         tt=time()
         with h5py.File(f'{self.local_feature_dir}/descriptors.h5', mode='r') as f_desc, \
             h5py.File(f'{self.local_feature_dir}/lafs.h5', mode='r') as f_laf, \
@@ -187,15 +198,22 @@ class SimpleRetrieval:
                     descs2 = torch.from_numpy(f_desc[fname][...])
                     lafs2 = torch.from_numpy(f_laf[fname][...])
                     if matching_method == 'adalam':
-                        dists, idxs = K.feature.match_adalam(descs, descs2,
-                                        lafs1,
-                                        lafs2,  # Adalam takes into account also geometric information
-                                        hw1=hw1, hw2=hw2)  # Adalam also benefits from knowing image size
+                        dists, idxs = K.feature.match_adalam(descs.to(device, dtype), descs2.to(device, dtype),
+                                        lafs1.to(device, dtype),
+                                        lafs2.to(device, dtype),  # Adalam takes into account also geometric information
+                                        hw1=hw1.to(device, dtype), hw2=hw2.to(device, dtype))  # Adalam also benefits from knowing image size
                     elif matching_method == 'smnn':
                         matcher = K.feature.match_smnn
-                        dists, idxs = matcher(descs, descs2, 0.99)
+                        dists, idxs = matcher(descs.to(device, dtype), descs2.to(device, dtype), 0.99)
+                    elif matching_method == 'faiss_gpu':
+                        D, I = gpu_index.search(descs2.cpu().numpy(), 2)
+                        idxs = torch.from_numpy(I[:, 0])
+                        snn_ratio = D[:, 0] / (1e-8 + D[:, 1])
+                        idxs = torch.cat([idxs.reshape(-1, 1), torch.arange(len(idxs)).reshape(-1, 1)], dim=1)
+                        mask = snn_ratio <=  0.9
+                        idxs = idxs[mask]
                     elif matching_method == 'flann':
-                        matches = flann.knnMatch(descs2.numpy(), k=2)
+                        matches = flann.knnMatch(descs2.float().numpy(), k=2)
                         valid_matches = []
                         for cur_match in matches:
                             tmp_valid_matches = [
@@ -209,7 +227,7 @@ class SimpleRetrieval:
                         raise NotImplementedError
                     kp1 = K.feature.get_laf_center(lafs1).reshape(-1, 2)
                     kp2 = K.feature.get_laf_center(lafs2).reshape(-1, 2)
-                    mkpts1, mkpts2  = get_matching_keypoints(kp1, kp2, idxs)
+                    mkpts1, mkpts2  = get_matching_keypoints(kp1, kp2, idxs.cpu())
                     matching_keypoints.append((mkpts1, mkpts2))
         print (f"Matching {matching_method} in {time()-tt:.4f} sec")
         tt=time()
@@ -229,7 +247,7 @@ class SimpleRetrieval:
             inliers = inliers > 0
             num_inl = inliers.sum()
             if num_inl>20:
-                if criterion == 'num_inl':
+                if criterion == 'num_inliers':
                     new_shortlist_scores.append(num_inl)
                 elif criterion == 'scale_factor_min':
                     scale_factor = get_scale_factor(H)
@@ -238,7 +256,7 @@ class SimpleRetrieval:
                     scale_factor = get_scale_factor(H)
                     new_shortlist_scores.append(scale_factor)
             else:
-                if criterion == 'num_inl':
+                if criterion == 'num_inliers':
                     new_shortlist_scores.append(num_inl)
                 else:
                     new_shortlist_scores.append(0)

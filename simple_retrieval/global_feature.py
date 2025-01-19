@@ -57,6 +57,8 @@ class DINOv2(nn.Module):
             f (torch.Tensor): The feature map [B, C, H // 14, W // 14].
             t (torch.Tensor): The token [B, C]. This is only returned if return_token is True.
         """
+        self.model.to(x.device)
+        self.model.patch_embed.proj.to(x.device)
         B, C, H, W = x.shape
 
         x = self.model.prepare_tokens_with_masks(x)
@@ -279,10 +281,10 @@ def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_w
     dtype = torch.float16 if 'cuda' in str(device) else torch.float32
     bs = batch_size
     model.eval()
-    dl = DataLoader(ds, batch_size=bs, num_workers=num_workers)
+    dl = DataLoader(ds, batch_size=bs, num_workers=num_workers, pin_memory=True)
     with torch.inference_mode():
         for img, _ in tqdm(dl):
-            global_desc.append(model(img.to(dev)).cpu())
+            global_desc.append(model(img.to(dev, dtype)).cpu())
     # Placeholder function for creating a global descriptor index
     global_descs = np.concatenate(global_desc, axis=0)
     print (f"{len(global_descs)} global descs in {time()-t:.2f} sec")
