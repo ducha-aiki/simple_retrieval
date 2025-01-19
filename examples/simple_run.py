@@ -50,7 +50,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers', type=int, default=1)
     parser.add_argument('--global_desc_batch_size', type=int, default=4)
     parser.add_argument('--local_desc_batch_size', type=int, default=4)
-    parser.add_argument('--matching_method', type=str, default='smnn')
+    parser.add_argument('--matching_method', type=str, default='snn')
     args = parser.parse_args()
     config = get_default_config()
     for k, v in vars(args).items():
