@@ -259,9 +259,14 @@ def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th
                 new_shortlist_scores.append(num_inl)
             elif criterion == 'scale_factor_min':
                 scale_factor = get_scale_factor(H)
-                new_shortlist_scores.append(1.0/scale_factor)
+                scale_factor = 1.0/scale_factor
+                if (scale_factor <= 0.1) or scale_factor > 10:
+                    scale_factor = 0.0
+                new_shortlist_scores.append(scale_factor)
             elif criterion == 'scale_factor_max':
                 scale_factor = get_scale_factor(H)
+                if (scale_factor <= 0.1) or scale_factor > 10:
+                    scale_factor = 0.0
                 new_shortlist_scores.append(scale_factor)
         else:
             if criterion == 'num_inliers':

@@ -224,8 +224,22 @@ class SALAD(nn.Module):
 
         return nn.functional.normalize(f, p=2, dim=-1)
 
-def get_input_transform(image_size=None):
+def get_input_transform_dinosalad(image_size=None):
     MEAN=[0.485, 0.456, 0.406]; STD=[0.229, 0.224, 0.225]
+    if image_size:
+        return T.Compose([
+            T.Resize(image_size,  interpolation=T.InterpolationMode.BILINEAR),
+            T.ToTensor(),
+            T.Normalize(mean=MEAN, std=STD)
+        ])
+    else:
+        return T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=MEAN, std=STD)
+        ])
+
+def get_input_transform_siglip(image_size=None):
+    MEAN=[0.5, 0.5, 0.5]; STD=[0.5, 0.5, 0.5]
     if image_size:
         return T.Compose([
             T.Resize(image_size,  interpolation=T.InterpolationMode.BILINEAR),
@@ -249,6 +263,33 @@ class SimpleDINOSALAD(nn.Module):
     def forward(self, x):
         x = self.backbone(x)
         return self.aggregator(x)
+
+
+class siglip2(nn.Module):
+    def __init__(self,device='cpu'):
+        super().__init__()
+        self.device=device
+        dtype = torch.float16 if 'cuda' in str(device) else torch.float32
+        self.dtype=dtype
+        from transformers import SiglipProcessor, SiglipVisionModel
+        self.model = SiglipVisionModel.from_pretrained(
+            "google/siglip-so400m-patch14-384",
+           # attn_implementation="flash_attention_2",
+            torch_dtype=dtype,
+            device_map=device,
+        ).eval()
+        self.processor = SiglipProcessor.from_pretrained("google/siglip-so400m-patch14-384")
+    def forward(self, x):
+        from transformers.feature_extraction_utils  import BatchFeature
+        #inputs = self.processor(images=x, padding="max_length", return_tensors="pt")
+        #inputs.to(self.device, dtype=self.dtype)
+        with torch.no_grad():
+            #with torch.autocast(self.device):
+            inp = BatchFeature(data={"pixel_values": x}, tensor_type='pt').to(self.device, self.dtype)
+            outputs = self.model(**inp)
+            features = outputs.last_hidden_state 
+            #print (features.shape)
+        return nn.functional.normalize(features.mean(dim=2), p=2, dim=-1)
 
 def get_dinov2salad(device='cpu', dtype=torch.float32):
     """

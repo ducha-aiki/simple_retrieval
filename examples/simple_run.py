@@ -24,7 +24,7 @@ def main(config=None, input_dir=None, global_desc_dir=None, local_desc_dir=None,
     #query_fname = '/Users/oldufo/datasets/oxford5k/all_souls_000006.jpg'
     #query_fname = '/Users/oldufo/datasets/EVD/1/graf.png'
     
-    shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname, num_nn=r.config["num_nn"], manifold_diffusion=r.config["use_diffusion"])
+    shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname, num_nn=r.config["num_nn"], manifold_diffusion=r.config["use_diffusion"], Wn=r.Wn)
     fnames = r.ds.samples  
     q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
     with torch.inference_mode():
@@ -51,6 +51,7 @@ if __name__ == "__main__":
                         help='Query image filename')
     parser.add_argument('--global_desc_dir', type=str, default='./tmp/global_desc')
     parser.add_argument('--use_diffusion',  action='store_true')
+    parser.add_argument('--global_features', type=str, default='dinosalad')
     parser.add_argument('--local_desc_dir', type=str, default='./tmp/local_desc')
     parser.add_argument('--resort_criterion', type=str, default='scale_factor_max', choices=['scale_factor_max', 'scale_factor_min', 'num_inliers'])	
     parser.add_argument('--num_nn', type=int, default=10)
