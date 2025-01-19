@@ -19,6 +19,7 @@ import h5py
 from simple_retrieval.global_feature import get_dinov2salad, get_input_transform, dataset_inference
 from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir, match_query_to_db, spatial_scoring
 from simple_retrieval.pile_of_garbage import CustomImageFolder
+from simple_retrieval.manifold_diffusion import sim_kernel, normalize_connection_graph, topK_W, cg_diffusion
 import cv2
 
 
@@ -31,6 +32,7 @@ def get_default_config():
             "local_desc_image_size": (1024,768),
             "local_desc_batch_size": 2,
             "num_workers": 1,
+            "use_diffusion": False,
             "global_desc_image_size": 448,
             "global_desc_batch_size": 2,
             "device": "cpu",
@@ -127,7 +129,7 @@ class SimpleRetrieval:
         print (f"Describe query in: {time()-t:.2f} sec")
         return global_desc.reshape(1, -1).detach().cpu().numpy()
     
-    def get_shortlist(self, query_fname, num_nn = 1000):
+    def get_shortlist(self, query_fname, num_nn = 1000, manifold_diffusion=False):
         """Returns a shortlist of images based on the global similarity query image.
         Args:
             query_fname (str): The filename of the query image.
@@ -137,19 +139,36 @@ class SimpleRetrieval:
             sims (np.ndarray): The similarity score of the nearest neighbors.
         """
         img = Image.open(query_fname).convert("RGB")
-        query = self.describe_query(img)
         t=time()
-        dists = np.linalg.norm(self.global_descs - query, axis=1)
+        query = self.describe_query(img)
+        if manifold_diffusion:
+            Q = query.reshape(-1, 1)
+            X = self.global_descs.T
+            K = 100 # approx 50 mutual nns
+            QUERYKNN = 50
+            R = 2000
+            alpha = 0.9
+            sim  = np.dot(X.T, Q)
+            qsim = sim_kernel(sim).T
+            sortidxs = np.argsort(-qsim, axis = 1)
+            for i in range(len(qsim)):
+                qsim[i,sortidxs[i,QUERYKNN:]] = 0
+            A = np.dot(X.T, X)
+            W = sim_kernel(A).T
+            W = topK_W(W, K)
+            Wn = normalize_connection_graph(W)
+            cg_sims = cg_diffusion(qsim, Wn, alpha)
+            dists = -cg_sims.reshape(-1)
+        else:
+            dists = np.linalg.norm(self.global_descs - query, axis=1)
         idxs = np.argsort(dists)[:num_nn]
-        print (f"Distances: {dists[idxs]}")
+        #print (f"Distances: {dists[idxs]}")
         print (f"Shortlist in: {time()-t:.2f} sec")
         return idxs, (2-dists[idxs])/2.0
     
     def resort_shortlist(self, query, shortlist, criterion = 'num_inl', device='cpu', matching_method='smnn'):
         # Placeholder function for retrieving data
         ### First, we need to get the local descriptors of the query image
-        assert matching_method in ['adalam', 'smnn', 'flann', 'faiss_gpu', 'faiss_cpu', 'snn']			
-        import kornia as K
         new_shortlist_scores = []
         matching_keypoints = []
         dtype = torch.float16 if 'cuda' in str(device) else torch.float32
@@ -195,7 +214,7 @@ def main():
 
     #query_fname = '/Users/oldufo/datasets/EVD/1/graf.png'
     
-    shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname, num_nn=r.config["num_nn"])
+    shortlist_idxs, shortlist_scores = r.get_shortlist(query_fname, num_nn=r.config["num_nn"], manifold_diffusion=r.config["use_diffusion"])
     fnames = r.ds.samples  
     q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
     with torch.inference_mode():
