@@ -28,7 +28,7 @@ def get_default_config():
             "global_features": "dinosalad",
             "inl_th": 2.0,
             "num_iter": 2000,
-            "num_local_features": 4096,
+            "num_local_features": 8196,
             "local_desc_image_size": (1024,768),
             "local_desc_batch_size": 2,
             "num_workers": 1,
@@ -207,9 +207,11 @@ class SimpleRetrieval:
         lafs1 = lafs1.to(device, dtype)
         fnames = [self.ds.samples[i] for i in shortlist]
         tt=time()
-        matching_keypoints = match_query_to_db(descs, lafs1, hw1,
+        with torch.inference_mode():
+            matching_keypoints = match_query_to_db(descs, lafs1, hw1,
                                                self.local_feature_dir,
                                                fnames,
+                                               feature_name=self.config['local_features'],
                                                matching_method=matching_method,
                                                device=torch.device(device))
         print (f"Matching {matching_method} in {time()-tt:.4f} sec")

@@ -9,7 +9,7 @@ import numpy as np
 import kornia.feature as KF
 from kornia_moons.feature import laf_from_opencv_SIFT_kpts
 from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset
-from simple_retrieval.xfeat import XFeat
+from simple_retrieval.xfeat import XFeat, LighterGlue
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from kornia_moons.feature import kornia_matches_from_cv2
@@ -50,18 +50,18 @@ def detect_sift_dir(img_fnames,
             h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc:
         for i, img_path in tqdm(enumerate(img_fnames)):
             img1 = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
-            hw1 = torch.tensor(img1.shape[:2], device=device)
+            hw1 = torch.tensor(img1.shape[:2])
             if resize_to:
                 img1 = cv2.resize(img1, resize_to)
-                hw1_new = torch.tensor(img1.shape[:2], device=device)
+                hw1_new = torch.tensor(img1.shape[:2])
             #img_fname = img_path.split('/')[-1]
             key = img_path
             kpts1, descs1 = sift.detectAndCompute(img1, None)
             lafs1 = laf_from_opencv_SIFT_kpts(kpts1)
             if resize_to:
-                lafs1[..., 0] *= hw1_new[1] / hw1[1]
-                lafs1[..., 1] *= hw1_new[0] / hw1[0]
-            descs1 = sift_to_rootsift(torch.from_numpy(descs1)).to(device)
+                lafs1[:, :, 0, :] *= hw1[1] / hw1_new[1]
+                lafs1[:, :, 1, :] *= hw1[0] / hw1_new[0]
+            descs1 = sift_to_rootsift(torch.from_numpy(descs1))
             desc_dim = descs1.shape[-1]
             kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
             descs1 = descs1.reshape(-1, desc_dim).detach().cpu().numpy()
@@ -82,15 +82,15 @@ def detect_sift_single(img, num_feats=2048, resize_to=(800, 600)):
     descs1 = sift_to_rootsift(torch.from_numpy(descs)).to(device)
     lafs1 = laf_from_opencv_SIFT_kpts(kpts)
     if resize_to:
-        lafs1[..., 0] *= hw1_new[1] / hw1[1]
-        lafs1[..., 1] *= hw1_new[0] / hw1[0]
+        lafs1[:, :, 0, :] *= hw1[1] / hw1_new[1]
+        lafs1[:, :, 1, :] *= hw1[0] / hw1_new[0]
     kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
     return kpts, descs1, lafs1
 
 
 def detect_xfeat_single(img, num_feats=2048, resize_to=(800, 600)):
     device=torch.device('cpu')
-    model = XFeat()
+    model = XFeat(top_k=num_feats, detection_threshold=0.0)
     hw1 = torch.tensor(img.shape[:2])
     if resize_to:
         img = cv2.resize(img, resize_to)
@@ -98,9 +98,10 @@ def detect_xfeat_single(img, num_feats=2048, resize_to=(800, 600)):
     res = model.detectAndCompute(K.image_to_tensor(img,None).float(), top_k=num_feats)
     keypoints, descriptors = res[0]['keypoints'], res[0]['descriptors']
     lafs1 = K.feature.laf_from_center_scale_ori(keypoints.reshape(1, -1, 2))
+    kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
     if resize_to:
-        lafs1[..., 0] *= hw1_new[1] / hw1[1]
-        lafs1[..., 1] *= hw1_new[0] / hw1[0]
+        lafs1[:, :, 0, :] *= hw1[1] / hw1_new[1]
+        lafs1[:, :, 1, :] *= hw1[0] / hw1_new[0]
     kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
     return kpts, descriptors, lafs1
 
@@ -113,7 +114,7 @@ def detect_xfeat_dir(img_fnames,
                 batch_size=1,
                 pin_memory=False):
 
-    model = XFeat()
+    model = XFeat(top_k=num_feats, detection_threshold=0.0)
     if not os.path.isdir(feature_dir):
         os.makedirs(feature_dir)
     ds = CustomImageFolderFromFileList(img_fnames,
@@ -139,8 +140,8 @@ def detect_xfeat_dir(img_fnames,
                     keypoints, descriptors = res[i]['keypoints'], res[i]['descriptors']
                     lafs1 = K.feature.laf_from_center_scale_ori(keypoints.reshape(1, -1, 2))
                     if resize_to:
-                        lafs1[..., 0] *= ws[i] / resize_to[1]
-                        lafs1[..., 1] *= hs[i] / resize_to[0]
+                        lafs1[:, :, 0, :]  *= ws[i] / resize_to[1]
+                        lafs1[:, :, 1, :]  *= hs[i] / resize_to[0]
                     desc_dim = descriptors.shape[-1]
                     kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
                     descriptors = descriptors.reshape(-1, desc_dim).detach().cpu().numpy()
@@ -156,7 +157,7 @@ def get_matching_keypoints(kp1, kp2, idxs):
     mkpts2 = kp2[idxs[:, 1]]
     return mkpts1, mkpts2
 
-def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_method='smnn', device=torch.device('cpu')):
+def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_method='smnn' , feature_name='xfeat', device=torch.device('cpu')):
     dtype = torch.float16 if 'cuda' in str(device) else torch.float32
     matching_keypoints=[]
     if matching_method == 'flann':
@@ -177,6 +178,9 @@ def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_
         index = faiss.IndexFlatL2(query_desc.shape[-1])
         index.add(query_desc.detach().float().cpu().numpy())
         print ("faiss CPU index created")
+    elif matching_method =='lightglue':
+        if feature_name =='xfeat':
+            matcher = LighterGlue(device=device).eval().to(dtype)
     shortlist_local_feature_dataset = H5LocalFeatureDataset(db_dir, fnames)
     lf_data_loader = DataLoader(shortlist_local_feature_dataset, batch_size=16, num_workers=2, collate_fn=no_collate)
     for descs2_batch, lafs2_batch, hw2_batch, fnames_batch in tqdm(lf_data_loader):
@@ -195,21 +199,32 @@ def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_
                 dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.99)
             elif matching_method == 'snn':
                 matcher = K.feature.match_snn
-                dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.9)
+                dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.95)
             elif matching_method in ['faiss_gpu', 'faiss_cpu']:	
                 D, I = index.search(descs2.cpu().numpy(), 2)
                 idxs = torch.from_numpy(I[:, 0])
                 snn_ratio = D[:, 0] / (1e-8 + D[:, 1])
                 idxs = torch.cat([idxs.reshape(-1, 1), torch.arange(len(idxs)).reshape(-1, 1)], dim=1)
-                mask = snn_ratio <=  0.9
+                mask = snn_ratio <=  0.95
                 idxs = idxs[mask]
+            elif matching_method == 'lightglue':
+                if feature_name ==  'xfeat':
+                    data = {'descriptors0': query_desc.to(device, dtype)[None],
+                             'keypoints0': K.feature.get_laf_center(query_laf).to(device, dtype),
+                             'image_size0': query_hw.reshape(1,2).flip(1).to(device, dtype),
+                             'descriptors1': descs2.to(device, dtype)[None],
+                             'keypoints1': K.feature.get_laf_center(lafs2.to(device, dtype)),
+                             'image_size1': hw2.to(device, dtype).reshape(1,2).flip(1)}
+                    #import pdb; pdb.set_trace()
+                    out = matcher(data)	
+                    idxs = out["matches"][0].detach().cpu()
             elif matching_method == 'flann':
                 matches = flann.knnMatch(descs2.float().numpy(), k=2)
                 valid_matches = []
                 for cur_match in matches:
                     tmp_valid_matches = [
                         nn_1 for nn_1, nn_2 in zip(cur_match[:-1], cur_match[1:])
-                        if nn_1.distance <= 0.9 * nn_2.distance
+                        if nn_1.distance <= 0.95 * nn_2.distance
                     ]
                     valid_matches.extend(tmp_valid_matches)
                 dists, idxs = kornia_matches_from_cv2(valid_matches)
