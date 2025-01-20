@@ -273,23 +273,19 @@ class siglip2(nn.Module):
         self.dtype=dtype
         from transformers import SiglipProcessor, SiglipVisionModel
         self.model = SiglipVisionModel.from_pretrained(
-            "google/siglip-so400m-patch14-384",
+            "google/siglip-large-patch16-384",
            # attn_implementation="flash_attention_2",
             torch_dtype=dtype,
             device_map=device,
         ).eval()
-        self.processor = SiglipProcessor.from_pretrained("google/siglip-so400m-patch14-384")
+        self.processor = SiglipProcessor.from_pretrained("google/siglip-large-patch16-384")
     def forward(self, x):
         from transformers.feature_extraction_utils  import BatchFeature
-        #inputs = self.processor(images=x, padding="max_length", return_tensors="pt")
-        #inputs.to(self.device, dtype=self.dtype)
-        with torch.no_grad():
-            #with torch.autocast(self.device):
+        with torch.inference_mode():
             inp = BatchFeature(data={"pixel_values": x}, tensor_type='pt').to(self.device, self.dtype)
             outputs = self.model(**inp)
-            features = outputs.last_hidden_state 
-            #print (features.shape)
-        return nn.functional.normalize(features.mean(dim=2), p=2, dim=-1)
+            features = outputs.pooler_output 
+        return nn.functional.normalize(features, p=2, dim=-1)
 
 def get_dinov2salad(device='cpu', dtype=torch.float32):
     """
