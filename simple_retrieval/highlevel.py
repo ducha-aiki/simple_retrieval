@@ -72,7 +72,7 @@ class SimpleRetrieval:
         return os.path.join(self.get_cache_dir_name(img_dir), f"{self.config['global_features']}_global_index.pth")
     
     def get_global_index_Wn_name(self, img_dir):
-        return os.path.join(self.get_cache_dir_name(img_dir),  f"{self.config['global_features']}_'Wn'.pth")
+        return os.path.join(self.get_cache_dir_name(img_dir),  f"{self.config['global_features']}_Wn.pth")
 
     def get_local_feature_dir(self, img_dir):
         local_desc_name = f"{self.config['local_features']}_{self.config['num_local_features']}"
@@ -100,18 +100,18 @@ class SimpleRetrieval:
             torch.save(self.global_descs, global_index_fname)
             print (f"Global index saved to:  {global_index_fname}")
             self.global_descs = torch.load(global_index_fname)
+        print (self.global_descs.shape, self.global_descs.dtype)
+        print (self.global_descs[0])
         if os.path.exists(Wn_fname) and not self.config["force_recache"]:
             self.Wn = torch.load(Wn_fname)
         else:
-            print(self.global_descs.shape)
-            self.Wn = None#self.get_Wn(self.global_descs.T, K = 100)
-            #torch.save(self.Wn, Wn_fname)
-        print (self.global_descs[0])
-        print (self.global_descs.shape, self.global_descs.dtype)
+            self.Wn = self.get_Wn(self.global_descs.T.astype(np.float32), K = 100)
+            torch.save(self.Wn, Wn_fname)
         return 
 
     def get_Wn(self, X, K = 100):
-        W = sim_kernel(np.dot(X.T, X))
+        A = np.dot(X.T, X)
+        W = sim_kernel(A)
         W = topK_W(W, K)
         Wn = normalize_connection_graph(W)
         return Wn
@@ -163,7 +163,7 @@ class SimpleRetrieval:
         t=time()
         query = self.describe_query(img)
         if manifold_diffusion:
-            Q = query.reshape(-1, 1)
+            Q = query.reshape(-1, 1).astype(np.float32)
             X = self.global_descs.T
             K = 100 # approx 50 mutual nns
             QUERYKNN = 50
