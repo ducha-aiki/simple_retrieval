@@ -52,6 +52,7 @@ if __name__ == "__main__":
     parser.add_argument('--global_desc_dir', type=str, default='./tmp/global_desc')
     parser.add_argument('--use_diffusion',  action='store_true')
     parser.add_argument('--global_features', type=str, default='dinosalad')
+    parser.add_argument('--local_features', type=str, default='xfeat')
     parser.add_argument('--local_desc_dir', type=str, default='./tmp/local_desc')
     parser.add_argument('--resort_criterion', type=str, default='scale_factor_max', choices=['scale_factor_max', 'scale_factor_min', 'num_inliers'])	
     parser.add_argument('--num_nn', type=int, default=10)
