@@ -162,7 +162,7 @@ class SimpleRetrieval:
         print (f"Describe query in: {time()-t:.2f} sec")
         return global_desc.reshape(1, -1).detach().cpu().numpy()
     
-    def get_shortlist(self, query_fname, num_nn = 1000, manifold_diffusion=False, Wn=None):
+    def get_shortlist(self, img, num_nn = 1000, manifold_diffusion=False, Wn=None):
         """Returns a shortlist of images based on the global similarity query image.
         Args:
             query_fname (str): The filename of the query image.
@@ -171,7 +171,10 @@ class SimpleRetrieval:
             idxs (np.ndarray): The indices of the nearest neighbors.
             sims (np.ndarray): The similarity score of the nearest neighbors.
         """
-        img = Image.open(query_fname).convert("RGB")
+        if isinstance(img, str):
+            img = Image.open(img).convert("RGB")
+        if isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
         t=time()
         query = self.describe_query(img)
         if manifold_diffusion:
