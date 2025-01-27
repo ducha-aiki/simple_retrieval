@@ -26,6 +26,26 @@ MY_CAPABILITIES = {
                 ]
             },
         ],
+        "images_overlays": [
+            {
+                "id": "rank",
+                "label": "Rank",
+                "type": "text",
+                "default": True,
+            },
+         #   {
+         #       "id": "name",
+         #       "label": "Name",
+         #       "type": "text",
+         #       "default": True,
+         #   },
+            {
+                "id": "score",
+                "label": "Score",
+                "type": "text",
+                "default": True,
+            }
+        ],
         "output_information": [
             {
                 "default": True,
@@ -47,6 +67,8 @@ MY_CAPABILITIES = {
         "search_modes": [
             {"id": "similarity", "label": "Similarity", "type": "image"},
             {"id": "num-inliers", "label": "Num Inliers", "type": "image"},
+            {"id": "similarity-bbox", "label": "Similarity BBox", "type": "image", "tool": "rectangle"},
+            {"id": "num-inliers-bbox", "label": "Num Inliers BBox", "type": "image", "tool": "rectangle"},
             {"id": "zoom-in", "label": "Zoom in", "type": "image", "tool": "rectangle"},
             {"id": "zoom-out", "label": "Zoom out", "type": "image", "tool": "rectangle"},
         ]	
@@ -107,18 +129,40 @@ async def images(request: Request):
             except KeyError:
                 search_mode = "similarity"
             criterion = engine.config["resort_criterion"]
+            crop_needed = False
             if search_mode == "zoom-in":
                 criterion = "scale_factor_max"
+                crop_needed = True
             elif search_mode == "zoom-out":
                 criterion = "scale_factor_min"
+                crop_needed = True
             elif search_mode == "similarity":
                 criterion = "skip"
             elif search_mode == "num-inliers":
                 criterion = "num_inliers"
+            elif search_mode == "similarity-bbox":
+                criterion = "skip"
+                crop_needed = True
+            elif search_mode == "num-inliers-bbox":
+                criterion = "num_inliers"
+                crop_needed = True
             else:
                 raise ValueError(f"Unknown search mode: {search_mode}")
+            q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
+            if crop_needed:
+                h, w = q_img.shape[:2]
+                tool_data = payload["data"]["query"]["search_mode"]["tool_data"]
+                x1, x2, y1, y2 = tool_data["x1"], tool_data["x2"], tool_data["y1"], tool_data["y2"]
+                x1, x2 = int(x1*w), int(x2*w)
+                y1, y2 = int(y1*h), int(y2*h)
+                xmin, xmax = min(x1, x2), max(x1, x2)
+                ymin, ymax = min(y1, y2), max(y1, y2)
+                print (f"Cropping image ({w, h}) to: {xmin, xmax, ymin, ymax}")
+                q_img = q_img[ymin:ymax, xmin:xmax]
+            # 'tool_data': {'x1': 0.2857, 'x2': 0.71, 'y1': 0.2123, 'y2': 0.7248}
             num_nn = max(100, min((offset + limit)*10, 1000))
-            shortlist_idxs, shortlist_scores = engine.get_shortlist(query_fname,
+            print (f'Searching for {num_nn} nearest neighbors')
+            shortlist_idxs, shortlist_scores = engine.get_shortlist(q_img,
                                                                     num_nn=num_nn,
                                                                     manifold_diffusion=engine.config["use_diffusion"],
                                                                     Wn=engine.Wn)
@@ -127,15 +171,25 @@ async def images(request: Request):
                 scores = shortlist_scores
             else:
                 matching_method = payload["data"]["engine_options"]["matching_method"]
-                q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
                 with torch.inference_mode():
                     idxs, scores = engine.resort_shortlist(q_img, shortlist_idxs,
                                                         matching_method=matching_method,
                                                         criterion=criterion,
                                                         device=engine.config["device"])
+                irrelevant_mask = scores == 0
+                # When the spatial verification returns zeros, we use the original shortlist
+                idxs = idxs[~irrelevant_mask]
+                scores = scores[~irrelevant_mask]
+                idxs_set = set(idxs)
+                rest_of_idxs = [i for i in shortlist_idxs if i not in idxs_set]
+                rest_of_scores = [0 for i in rest_of_idxs]
+                idxs = list(idxs) + rest_of_idxs
+                scores = list(scores) + rest_of_scores
+
         print (criterion, scores[:10])
         output ={"data": {"images": [{"path": fnames[idx].replace(engine.config["input_dir"], ""),
-                                    "overlays": [{"rank": int(i)+offset, "name": int(idx), "score": str(scores[i+offset])}],
+                                    "images_overlays": [{"rank": str(int(i)+offset),
+                                                  "score": f"{scores[i+offset]:.3f}"}],
                                     "prefix": "oxford5k"}
                                     for i, idx in enumerate(idxs[offset:offset+limit])]}}
         return output
@@ -169,6 +223,7 @@ if __name__ == "__main__":
         config[k] = v
     print (f"Config: {config}")
     engine = SimpleRetrieval(img_dir=args.input_dir, index_dir=args.global_desc_dir, config=config)
+    engine.upload_dir = args.upload_dir
     print (engine)
     engine.create_global_descriptor_index(args.input_dir,
                                      args.global_desc_dir)
