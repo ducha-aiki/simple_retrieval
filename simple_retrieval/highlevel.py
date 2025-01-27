@@ -74,6 +74,18 @@ class SimpleRetrieval:
     def get_global_index_Wn_name(self, img_dir):
         return os.path.join(self.get_cache_dir_name(img_dir),  f"{self.config['global_features']}_Wn.pth")
 
+    def get_random_shortlist(self, num_nn = 100):
+        """Returns a random shortlist of images.
+        Args:
+            num_nn (int): The number of nearest neighbors to return.
+        Returns:
+            idxs (np.ndarray): The indices of the nearest neighbors.
+            sims (np.ndarray): The similarity score of the nearest neighbors.
+        """
+        idxs = np.random.choice(len(self.ds), num_nn, replace=False)
+        sims = np.random.rand(num_nn)
+        return idxs, sims
+
     def get_local_feature_dir(self, img_dir):
         local_desc_name = f"{self.config['local_features']}_{self.config['num_local_features']}"
         return os.path.join(self.get_cache_dir_name(img_dir), local_desc_name)
