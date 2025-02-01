@@ -182,59 +182,84 @@ def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_
         if feature_name =='xfeat':
             matcher = LighterGlue(device=device).eval().to(dtype)
     shortlist_local_feature_dataset = H5LocalFeatureDataset(db_dir, fnames)
-    lf_data_loader = DataLoader(shortlist_local_feature_dataset, batch_size=16, num_workers=2, collate_fn=no_collate)
+    kp1 = K.feature.get_laf_center(query_laf).reshape(-1, 2)
+    batch_size = 2
+    if len(kp1) <= 4096:
+        batch_size = 16
+    if len(kp1) <= 2048:
+        batch_size = 32
+    if len(kp1) <= 1024:
+        batch_size = 64
+    if str(device) != 'cuda':
+        batch_size = 1
+    lf_data_loader = DataLoader(shortlist_local_feature_dataset, batch_size=batch_size, num_workers=2, collate_fn=no_collate)
     for descs2_batch, lafs2_batch, hw2_batch, fnames_batch in tqdm(lf_data_loader):
-        for i in range(len(fnames_batch)):
-            descs2 = descs2_batch[i]
-            lafs2 = lafs2_batch[i]
-            hw2 = hw2_batch[i]
-            fname = fnames_batch[i]
-            if matching_method == 'adalam':
-                dists, idxs = K.feature.match_adalam(query_desc, descs2.to(device, dtype),
-                                query_laf,
-                                lafs2.to(device, dtype),  # Adalam takes into account also geometric information
-                                hw1=query_hw, hw2=hw2.to(device, dtype))  # Adalam also benefits from knowing image size
-            elif matching_method == 'smnn':
-                matcher = K.feature.match_smnn
-                dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.99)
-            elif matching_method == 'snn':
-                matcher = K.feature.match_snn
-                dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.95)
-            elif matching_method in ['faiss_gpu', 'faiss_cpu']:	
-                D, I = index.search(descs2.cpu().numpy(), 2)
-                idxs = torch.from_numpy(I[:, 0])
-                snn_ratio = D[:, 0] / (1e-8 + D[:, 1])
-                idxs = torch.cat([idxs.reshape(-1, 1), torch.arange(len(idxs)).reshape(-1, 1)], dim=1)
-                mask = snn_ratio <=  0.95
-                idxs = idxs[mask]
-            elif matching_method == 'lightglue':
-                if feature_name ==  'xfeat':
-                    data = {'descriptors0': query_desc.to(device, dtype)[None],
-                             'keypoints0': K.feature.get_laf_center(query_laf).to(device, dtype),
-                             'image_size0': query_hw.reshape(1,2).flip(1).to(device, dtype),
-                             'descriptors1': descs2.to(device, dtype)[None],
-                             'keypoints1': K.feature.get_laf_center(lafs2.to(device, dtype)),
-                             'image_size1': hw2.to(device, dtype).reshape(1,2).flip(1)}
-                    #import pdb; pdb.set_trace()
-                    out = matcher(data)	
-                    idxs = out["matches"][0].detach().cpu()
-            elif matching_method == 'flann':
-                matches = flann.knnMatch(descs2.float().numpy(), k=2)
-                valid_matches = []
-                for cur_match in matches:
-                    tmp_valid_matches = [
-                        nn_1 for nn_1, nn_2 in zip(cur_match[:-1], cur_match[1:])
-                        if nn_1.distance <= 0.95 * nn_2.distance
-                    ]
-                    valid_matches.extend(tmp_valid_matches)
-                dists, idxs = kornia_matches_from_cv2(valid_matches)
-                idxs = idxs.flip(1)
-            else:
-                raise NotImplementedError
-            kp1 = K.feature.get_laf_center(query_laf).reshape(-1, 2)
-            kp2 = K.feature.get_laf_center(lafs2).reshape(-1, 2)
-            mkpts1, mkpts2  = get_matching_keypoints(kp1, kp2, idxs.cpu())
-            matching_keypoints.append((mkpts1, mkpts2))
+        if matching_method == 'lightglue':
+            #rint ("batched_method")
+            if feature_name ==  'xfeat':
+                kp2 = K.feature.get_laf_center(torch.cat(lafs2_batch, dim=0).to(device, dtype))
+                data = {'descriptors0': query_desc.to(device, dtype)[None].expand(len(fnames_batch), -1, -1),
+                        'keypoints0': kp1.to(device, dtype).expand(len(fnames_batch), -1, -1),
+                        'image_size0': query_hw.reshape(1,2).flip(1).to(device, dtype).repeat(len(fnames_batch), 1),
+                        'descriptors1': torch.stack(descs2_batch, axis=0).to(device, dtype),
+                        'keypoints1': kp2,
+                        'image_size1': torch.stack(hw2_batch).to(device, dtype).reshape(-1,2).flip(1)}
+                out = matcher(data)
+                for i in range(len(fnames_batch)):
+                    idxs = out["matches"][i].detach().cpu()
+                    mkpts1, mkpts2  = get_matching_keypoints(kp1.cpu(), kp2[i].reshape(-1, 2).cpu(), idxs)
+                    matching_keypoints.append((mkpts1, mkpts2))
+        else:
+            for i in range(len(fnames_batch)):
+                descs2 = descs2_batch[i]
+                lafs2 = lafs2_batch[i]
+                hw2 = hw2_batch[i]
+                fname = fnames_batch[i]
+                if matching_method == 'adalam':
+                    dists, idxs = K.feature.match_adalam(query_desc, descs2.to(device, dtype),
+                                    query_laf,
+                                    lafs2.to(device, dtype),  # Adalam takes into account also geometric information
+                                    hw1=query_hw, hw2=hw2.to(device, dtype))  # Adalam also benefits from knowing image size
+                elif matching_method == 'smnn':
+                    matcher = K.feature.match_smnn
+                    dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.99)
+                elif matching_method == 'snn':
+                    matcher = K.feature.match_snn
+                    dists, idxs = matcher(query_desc, descs2.to(device, dtype), 0.95)
+                elif matching_method in ['faiss_gpu', 'faiss_cpu']:	
+                    D, I = index.search(descs2.cpu().numpy(), 2)
+                    idxs = torch.from_numpy(I[:, 0])
+                    snn_ratio = D[:, 0] / (1e-8 + D[:, 1])
+                    idxs = torch.cat([idxs.reshape(-1, 1), torch.arange(len(idxs)).reshape(-1, 1)], dim=1)
+                    mask = snn_ratio <=  0.95
+                    idxs = idxs[mask]
+                elif matching_method == 'lightglue':
+                    if feature_name ==  'xfeat':
+                        data = {'descriptors0': query_desc.to(device, dtype)[None],
+                                'keypoints0': K.feature.get_laf_center(query_laf).to(device, dtype),
+                                'image_size0': query_hw.reshape(1,2).flip(1).to(device, dtype),
+                                'descriptors1': descs2.to(device, dtype)[None],
+                                'keypoints1': K.feature.get_laf_center(lafs2.to(device, dtype)),
+                                'image_size1': hw2.to(device, dtype).reshape(1,2).flip(1)}
+                        #import pdb; pdb.set_trace()
+                        out = matcher(data)	
+                        idxs = out["matches"][0].detach().cpu()
+                elif matching_method == 'flann':
+                    matches = flann.knnMatch(descs2.float().numpy(), k=2)
+                    valid_matches = []
+                    for cur_match in matches:
+                        tmp_valid_matches = [
+                            nn_1 for nn_1, nn_2 in zip(cur_match[:-1], cur_match[1:])
+                            if nn_1.distance <= 0.95 * nn_2.distance
+                        ]
+                        valid_matches.extend(tmp_valid_matches)
+                    dists, idxs = kornia_matches_from_cv2(valid_matches)
+                    idxs = idxs.flip(1)
+                else:
+                    raise NotImplementedError
+                kp2 = K.feature.get_laf_center(lafs2).reshape(-1, 2)
+                mkpts1, mkpts2  = get_matching_keypoints(kp1, kp2, idxs.cpu())
+                matching_keypoints.append((mkpts1, mkpts2))
     return matching_keypoints
 
 
@@ -256,7 +281,7 @@ def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th
     new_shortlist_scores = []
     for i, idx in tqdm(enumerate(matching_keypoints)):
         mkpts1, mkpts2 = matching_keypoints[i]
-        if len(mkpts1) < 5:
+        if len(mkpts1) < 50:
             new_shortlist_scores.append(0)
             continue
         H, inliers = cv2.findHomography(
@@ -269,19 +294,21 @@ def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th
         )
         inliers = inliers > 0
         num_inl = inliers.sum()
-        if num_inl>20:
+        if num_inl>50:
             if criterion == 'num_inliers':
                 new_shortlist_scores.append(num_inl)
             elif criterion == 'scale_factor_min':
                 scale_factor = get_scale_factor(H)
                 scale_factor = 1.0/scale_factor
-                if (scale_factor <= 0.1) or scale_factor > 10:
+                if (scale_factor <= 0.12) or scale_factor > 8:
                     scale_factor = 0.0
+                print (f"Scale factor: {scale_factor}, num_inliers: {num_inl}")
                 new_shortlist_scores.append(scale_factor)
             elif criterion == 'scale_factor_max':
                 scale_factor = get_scale_factor(H)
-                if (scale_factor <= 0.1) or scale_factor > 10:
+                if (scale_factor <= 0.12) or scale_factor > 8:
                     scale_factor = 0.0
+                print (f"Scale factor: {scale_factor}, num_inliers: {num_inl}")
                 new_shortlist_scores.append(scale_factor)
         else:
             if criterion == 'num_inliers':
