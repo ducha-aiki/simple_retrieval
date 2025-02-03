@@ -5,6 +5,7 @@ from simple_retrieval.highlevel import SimpleRetrieval, get_default_config
 import cv2
 import torch
 import os
+from time import time
 
 app = FastAPI()
 
@@ -24,6 +25,13 @@ MY_CAPABILITIES = {
                     "snn",
                     "lightglue"
                 ]
+            },
+                {
+                "default": True,
+                "id": "diffusion",
+                "label": "diffusion",
+                "type": "bool",
+           
             },
         ],
         "images_overlays": [
@@ -46,20 +54,14 @@ MY_CAPABILITIES = {
                 "default": True,
             }
         ],
-        "output_information": [
-            {
-                "default": True,
-                "id": "image_info",
-                "label": "Image information",
-                "type": "image"
-            },
-            {
-                "default": True,
-                "id": "text_info",
-                "label": "Text information",
-                "type": "text"
-            }
-        ],
+        #"output_information": [
+        #    {
+        #        "default":  True,
+        #        "id": "text_info",
+        #        "label": "Text information",
+        #        "type": "text"
+        #    }
+        #],
         "search_types": [
             "image",
             "upload"
@@ -115,9 +117,14 @@ async def images(request: Request):
         limit = int(payload["data"]["limit"])
         offset = int(payload["data"]["offset"])
         fnames = engine.ds.samples 
+        t=time()
         if "query" not in payload["data"]: # browsing request
-            idxs, scores = engine.get_random_shortlist(offset + limit)
             criterion='random'
+            idxs, scores = engine.get_random_shortlist(offset + limit)
+            shortlist_idxs = idxs
+            resorted_scores = scores
+            resorted_idxs = idxs
+            shortlist_scores = scores
         else:
             query_fname = payload["data"]["query"]["value"]["path"]
             if payload["data"]["query"]["type"] == "upload":
@@ -159,7 +166,6 @@ async def images(request: Request):
                 ymin, ymax = min(y1, y2), max(y1, y2)
                 print (f"Cropping image ({w, h}) to: {xmin, xmax, ymin, ymax}")
                 q_img = q_img[ymin:ymax, xmin:xmax]
-            # 'tool_data': {'x1': 0.2857, 'x2': 0.71, 'y1': 0.2123, 'y2': 0.7248}
             num_nn = max(100, min((offset + limit)*10, 1000))
             print (f'Searching for {num_nn} nearest neighbors')
             shortlist_idxs, shortlist_scores = engine.get_shortlist(q_img,
@@ -169,29 +175,35 @@ async def images(request: Request):
             if criterion == "skip":
                 idxs = shortlist_idxs
                 scores = shortlist_scores
+                resorted_scores = shortlist_scores
+                resorted_idxs = shortlist_idxs
             else:
                 matching_method = payload["data"]["engine_options"]["matching_method"]
                 with torch.inference_mode():
-                    idxs, scores = engine.resort_shortlist(q_img, shortlist_idxs,
+                    resorted_idxs, resorted_scores = engine.resort_shortlist(q_img, shortlist_idxs,
                                                         matching_method=matching_method,
                                                         criterion=criterion,
                                                         device=engine.config["device"])
-                irrelevant_mask = scores == 0
+                irrelevant_mask = resorted_scores == 0
                 # When the spatial verification returns zeros, we use the original shortlist
-                idxs = idxs[~irrelevant_mask]
-                scores = scores[~irrelevant_mask]
+                idxs = resorted_idxs[~irrelevant_mask]
+                scores = resorted_scores[~irrelevant_mask]
                 idxs_set = set(idxs)
                 rest_of_idxs = [i for i in shortlist_idxs if i not in idxs_set]
-                rest_of_scores = [0 for i in rest_of_idxs]
+                rest_of_scores = [shortlist_scores[i] for i, idx in enumerate(shortlist_idxs) if i not in idxs_set]
                 idxs = list(idxs) + rest_of_idxs
                 scores = list(scores) + rest_of_scores
-
         print (criterion, scores[:10])
+        shortlist_idxs = shortlist_idxs.tolist()
         output ={"data": {"images": [{"path": fnames[idx].replace(engine.config["input_dir"], ""),
-                                    "images_overlays": [{"rank": str(int(i)+offset),
-                                                  "score": f"{scores[i+offset]:.3f}"}],
+                                    "overlays": {"rank": f"Rank: {str(int(i)+offset)}",
+                                                "score": f"{criterion}: {resorted_scores[i+offset]:.3g}, global_similarity: {shortlist_scores[shortlist_idxs.index(idx)]:.3g}"},
+                                       "output_information": { "text_info": f"{scores[i+offset]:.3f}"},                   
                                     "prefix": "oxford5k"}
                                     for i, idx in enumerate(idxs[offset:offset+limit])]}}
+        if "query" in payload["data"]:
+            output["data"]["query_image"] = {"overlays": {"rank": "", "score": "Query image"}}
+            output["data"]["query_text"] = f"Processed in {time()-t:.4g} seconds"
         return output
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing request: {str(e)}")
