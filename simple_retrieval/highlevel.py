@@ -178,6 +178,7 @@ class SimpleRetrieval:
         t=time()
         query = self.describe_query(img)
         if manifold_diffusion:
+            print("Diffusion")
             Q = query.reshape(-1, 1).astype(np.float32)
             X = self.global_descs.T
             K = 100 # approx 50 mutual nns
@@ -209,7 +210,7 @@ class SimpleRetrieval:
         matching_keypoints = []
         dtype = torch.float16 if 'cuda' in str(device) else torch.float32
         hw1 = torch.tensor(query.shape[:2]).to(device, dtype)
-
+        hq, wq = query.shape[:2]
         if self.config["local_features"] == "sift":
             kpt, descs, lafs1 = detect_sift_single(query,
                                                    num_feats=self.config["num_local_features"],
@@ -223,7 +224,7 @@ class SimpleRetrieval:
         fnames = [self.ds.samples[i] for i in shortlist]
         tt=time()
         with torch.inference_mode():
-            matching_keypoints = match_query_to_db(descs, lafs1, hw1,
+            matching_keypoints, hw2_s = match_query_to_db(descs, lafs1, hw1,
                                                self.local_feature_dir,
                                                fnames,
                                                feature_name=self.config['local_features'],
@@ -231,10 +232,25 @@ class SimpleRetrieval:
                                                device=torch.device(device))
         print (f"Matching {matching_method} in {time()-tt:.4f} sec")
         tt=time()
-        new_shortlist_scores = spatial_scoring(matching_keypoints, criterion=criterion, config=self.config)
+        new_shortlist_scores, Hs = spatial_scoring(matching_keypoints, criterion=criterion, config=self.config)
+        ### 
+        topleft = np.array([0, 0, 1])
+        bottomleft = np.array([0, hq, 1])
+        topright = np.array([wq, 0, 1])
+        bottomright = np.array([wq, hq, 1])
+        corners = np.stack([topleft, bottomleft, bottomright, topright, topleft], axis=0)
+        print (corners.shape)
+        print (np.array(Hs).shape)
+        corners = np.dot(np.array(Hs), corners.T).T
+        corners = corners / corners[:, 2][:, None]
+        corners = corners[:, :2].transpose(2, 0, 1)
+        print (corners.shape, np.array(hw2_s).shape)
+        wh2 = np.array(hw2_s)[:,::-1][:, None]
+        corners_norm = corners / wh2
+        print (corners_norm.shape)
         print (f"RANSAC in {time()-tt:.4f} sec")
         sorted_idxs = np.argsort(new_shortlist_scores)[::-1]
-        return shortlist[sorted_idxs], new_shortlist_scores[sorted_idxs]
+        return shortlist[sorted_idxs], new_shortlist_scores[sorted_idxs], corners_norm[sorted_idxs]
 
 def main():
     # Example usage of the retrieve_data function

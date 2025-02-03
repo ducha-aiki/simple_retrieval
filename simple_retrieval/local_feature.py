@@ -160,6 +160,7 @@ def get_matching_keypoints(kp1, kp2, idxs):
 def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_method='smnn' , feature_name='xfeat', device=torch.device('cpu')):
     dtype = torch.float16 if 'cuda' in str(device) else torch.float32
     matching_keypoints=[]
+    out_hw2 = []
     if matching_method == 'flann':
         FLANN_INDEX_KDTREE = 1  # FLANN_INDEX_KDTREE
         index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=2)
@@ -209,6 +210,7 @@ def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_
                     idxs = out["matches"][i].detach().cpu()
                     mkpts1, mkpts2  = get_matching_keypoints(kp1.cpu(), kp2[i].reshape(-1, 2).cpu(), idxs)
                     matching_keypoints.append((mkpts1, mkpts2))
+                    out_hw2.append(hw2_batch[i])
         else:
             for i in range(len(fnames_batch)):
                 descs2 = descs2_batch[i]
@@ -260,7 +262,8 @@ def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_
                 kp2 = K.feature.get_laf_center(lafs2).reshape(-1, 2)
                 mkpts1, mkpts2  = get_matching_keypoints(kp1, kp2, idxs.cpu())
                 matching_keypoints.append((mkpts1, mkpts2))
-    return matching_keypoints
+                out_hw2.append(hw2)
+    return matching_keypoints, out_hw2
 
 
 def get_scale_factor(H):
@@ -279,10 +282,12 @@ def get_scale_factor(H):
 
 def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th": 3.0, "num_iter": 1000}):
     new_shortlist_scores = []
+    Hs = []
     for i, idx in tqdm(enumerate(matching_keypoints)):
         mkpts1, mkpts2 = matching_keypoints[i]
         if len(mkpts1) < 50:
             new_shortlist_scores.append(0)
+            Hs.append(np.zeros((3, 3)))
             continue
         H, inliers = cv2.findHomography(
             mkpts1.detach().cpu().numpy(),
@@ -294,6 +299,8 @@ def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th
         )
         inliers = inliers > 0
         num_inl = inliers.sum()
+        if H is None:
+            H = np.zeros((3, 3))
         if num_inl>50:
             if criterion == 'num_inliers':
                 new_shortlist_scores.append(num_inl)
@@ -315,5 +322,6 @@ def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th
                 new_shortlist_scores.append(num_inl)
             else:
                 new_shortlist_scores.append(0)
+        Hs.append(H)
     new_shortlist_scores = np.array(new_shortlist_scores)
-    return new_shortlist_scores
+    return new_shortlist_scores, Hs
