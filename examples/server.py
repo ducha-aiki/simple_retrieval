@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 import uvicorn
 import argparse
 from simple_retrieval.highlevel import SimpleRetrieval, get_default_config
 import cv2
 import torch
+import numpy as np
 import os
 from time import time
 
@@ -13,7 +14,6 @@ engine = None
 
 
 MY_CAPABILITIES = {
-
     "data": {
         "engine_options": [
         {
@@ -41,12 +41,12 @@ MY_CAPABILITIES = {
                 "type": "text",
                 "default": True,
             },
-         #   {
-         #       "id": "name",
-         #       "label": "Name",
-         #       "type": "text",
-         #       "default": True,
-         #   },
+            {
+                "default": False,
+                "id": "paths_over",
+                "label": "Path overlay",
+                "type": "paths"
+            },
             {
                 "id": "score",
                 "label": "Score",
@@ -76,6 +76,9 @@ MY_CAPABILITIES = {
         ]	
     }
 }
+
+def convert_points_to_path(pts):
+    return [{"color": "#edae49", "points_xy": [[float(x), float(y)] for x, y in pts]}]
 
 @app.middleware("http")
 async def log_invalid_requests(request: Request, call_next):
@@ -109,7 +112,7 @@ async def image(request: Request):
         raise HTTPException(status_code=400, detail=f"Error processing request: {str(e)}")
 
 @app.post("/images")
-async def images(request: Request):
+async def images(request: Request, background_tasks: BackgroundTasks):
     try:
         payload = await request.json()
         print(payload.keys())
@@ -125,11 +128,13 @@ async def images(request: Request):
             resorted_scores = scores
             resorted_idxs = idxs
             shortlist_scores = scores
+            bboxes = [[] for _ in range(len(idxs))]
         else:
             query_fname = payload["data"]["query"]["value"]["path"]
-            if payload["data"]["query"]["type"] == "upload":
+            use_diffusion = payload["data"]["engine_options"]["diffusion"]
+            if payload["data"]["query"]["value"]["prefix"] == "upload":
                 query_fname = os.path.join(engine.upload_dir, query_fname) # prepend the upload directory
-            elif payload["data"]["query"]["type"] == "image":
+            elif payload["data"]["query"]["value"]["prefix"] == "image":
                 query_fname = os.path.join(engine.img_dir, query_fname) # prepend the image directory
             try:
                 search_mode = payload["data"]["query"]["search_mode"]["id"]
@@ -166,47 +171,57 @@ async def images(request: Request):
                 ymin, ymax = min(y1, y2), max(y1, y2)
                 print (f"Cropping image ({w, h}) to: {xmin, xmax, ymin, ymax}")
                 q_img = q_img[ymin:ymax, xmin:xmax]
+            hq, wq = q_img.shape[:2]
             num_nn = max(100, min((offset + limit)*10, 1000))
             print (f'Searching for {num_nn} nearest neighbors')
             shortlist_idxs, shortlist_scores = engine.get_shortlist(q_img,
                                                                     num_nn=num_nn,
-                                                                    manifold_diffusion=engine.config["use_diffusion"],
+                                                                    manifold_diffusion=use_diffusion,
                                                                     Wn=engine.Wn)
             if criterion == "skip":
                 idxs = shortlist_idxs
                 scores = shortlist_scores
                 resorted_scores = shortlist_scores
                 resorted_idxs = shortlist_idxs
+                bboxes = [[] for _ in range(len(idxs))]
             else:
                 matching_method = payload["data"]["engine_options"]["matching_method"]
                 with torch.inference_mode():
-                    resorted_idxs, resorted_scores = engine.resort_shortlist(q_img, shortlist_idxs,
+                    resorted_idxs, resorted_scores, resorted_bboxes = engine.resort_shortlist(q_img, shortlist_idxs,
                                                         matching_method=matching_method,
                                                         criterion=criterion,
                                                         device=engine.config["device"])
+
                 irrelevant_mask = resorted_scores == 0
                 # When the spatial verification returns zeros, we use the original shortlist
                 idxs = resorted_idxs[~irrelevant_mask]
                 scores = resorted_scores[~irrelevant_mask]
+                bboxes = resorted_bboxes[~irrelevant_mask]
                 idxs_set = set(idxs)
                 rest_of_idxs = [i for i in shortlist_idxs if i not in idxs_set]
                 rest_of_scores = [shortlist_scores[i] for i, idx in enumerate(shortlist_idxs) if i not in idxs_set]
                 idxs = list(idxs) + rest_of_idxs
                 scores = list(scores) + rest_of_scores
+                bboxes = list(bboxes) + []*len(rest_of_idxs)
         print (criterion, scores[:10])
         shortlist_idxs = shortlist_idxs.tolist()
+
+
         output ={"data": {"images": [{"path": fnames[idx].replace(engine.config["input_dir"], ""),
                                     "overlays": {"rank": f"Rank: {str(int(i)+offset)}",
-                                                "score": f"{criterion}: {resorted_scores[i+offset]:.3g}, global_similarity: {shortlist_scores[shortlist_idxs.index(idx)]:.3g}"},
+                                                 "score": f"{criterion}: {resorted_scores[i+offset]:.3g}, global_similarity: {shortlist_scores[shortlist_idxs.index(idx)]:.3g}",
+                                                 "paths_over": convert_points_to_path(bboxes[i+offset]) if len(bboxes) > 0 else []},
+ 
                                        "output_information": { "text_info": f"{scores[i+offset]:.3f}"},                   
                                     "prefix": "oxford5k"}
                                     for i, idx in enumerate(idxs[offset:offset+limit])]}}
         if "query" in payload["data"]:
             output["data"]["query_image"] = {"overlays": {"rank": "", "score": "Query image"}}
             output["data"]["query_text"] = f"Processed in {time()-t:.4g} seconds"
+        background_tasks.add_task(torch.cuda.empty_cache)
         return output
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error processing request: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Simple retrieval server')
