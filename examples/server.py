@@ -131,15 +131,17 @@ async def images(request: Request, background_tasks: BackgroundTasks):
             bboxes = [[] for _ in range(len(idxs))]
         else:
             query_fname = payload["data"]["query"]["value"]["path"]
+            print(query_fname)
             use_diffusion = payload["data"]["engine_options"]["diffusion"]
             if payload["data"]["query"]["value"]["prefix"] == "upload":
                 query_fname = os.path.join(engine.upload_dir, query_fname) # prepend the upload directory
-            elif payload["data"]["query"]["value"]["prefix"] == "image":
+            elif payload["data"]["query"]["value"]["prefix"] == "oxford5k":
                 query_fname = os.path.join(engine.img_dir, query_fname) # prepend the image directory
             try:
                 search_mode = payload["data"]["query"]["search_mode"]["id"]
             except KeyError:
                 search_mode = "similarity"
+            print(query_fname)
             criterion = engine.config["resort_criterion"]
             crop_needed = False
             if search_mode == "zoom-in":
@@ -197,15 +199,16 @@ async def images(request: Request, background_tasks: BackgroundTasks):
                 idxs = resorted_idxs[~irrelevant_mask]
                 scores = resorted_scores[~irrelevant_mask]
                 bboxes = resorted_bboxes[~irrelevant_mask]
+                print(len(idxs), len(scores), len(bboxes))
                 idxs_set = set(idxs)
                 rest_of_idxs = [i for i in shortlist_idxs if i not in idxs_set]
                 rest_of_scores = [shortlist_scores[i] for i, idx in enumerate(shortlist_idxs) if i not in idxs_set]
                 idxs = list(idxs) + rest_of_idxs
                 scores = list(scores) + rest_of_scores
-                bboxes = list(bboxes) + []*len(rest_of_idxs)
+                bboxes = list(bboxes) + [[]]*len(rest_of_scores)
         print (criterion, scores[:10])
         shortlist_idxs = shortlist_idxs.tolist()
-
+        print (len(scores), len(bboxes))
 
         output ={"data": {"images": [{"path": fnames[idx].replace(engine.config["input_dir"], ""),
                                     "overlays": {"rank": f"Rank: {str(int(i)+offset)}",
