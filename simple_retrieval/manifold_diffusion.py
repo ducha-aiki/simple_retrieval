@@ -102,18 +102,10 @@ def get_W_sparse(X, K=100, bs=32):
     # Process the samples in batches.
     with torch.inference_mode():
         for i in tqdm(range(0, num_samples, bs), desc="Processing batches"):
-            # current_X is a (D, current_bs) chunk.
             current_X = X_torch[:, i:i+bs]
-            # Compute the similarity kernel between current_X and the whole X.
-            # current_X.T @ X_torch produces a (current_bs x num_samples) matrix.
             current_W = sim_kernel_torch(current_X.T @ X_torch)
-            
-            # For each row in the current batch, extract the top-K entries.
-            # top_val and top_idx have shape (current_bs, K)
             top_val, top_idx = torch.topk(current_W, K, dim=1, sorted=False)
             current_bs = current_W.size(0)
-            
-            # The global row indices for this batch (offset by i).
             batch_rows = torch.arange(i, i + current_bs, device=device).unsqueeze(1).expand(current_bs, K)
             
             # Flatten the batch tensors and move them to CPU.
@@ -128,7 +120,6 @@ def get_W_sparse(X, K=100, bs=32):
     
     # Build the huge sparse matrix.
     W_sparse = csr_matrix((data, (rows, cols)), shape=(num_samples, num_samples))
-    
     # Enforce symmetry (each edge weight becomes the minimum of its two directions).
     W_sparse = W_sparse.minimum(W_sparse.transpose())
     

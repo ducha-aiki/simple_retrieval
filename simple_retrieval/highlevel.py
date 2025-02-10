@@ -202,12 +202,23 @@ class SimpleRetrieval:
                 Wn = normalize_connection_graph(W)
             cg_sims = cg_diffusion(qsim, Wn, alpha)
             dists = -cg_sims.reshape(-1)
+            idxs = np.argsort(dists)[:num_nn]
+            out_vals = (2-dists[idxs])/2.0
         else:
-            dists = np.linalg.norm(self.global_descs - query, axis=1)
-        idxs = np.argsort(dists)[:num_nn]
+            if torch.cuda.is_available() and len(self.global_descs) > 10000:
+                dists = torch.norm(torch.from_numpy(self.global_descs).to(torch.device('cuda'), torch.float16) - torch.from_numpy(query).to(torch.device('cuda'), torch.float16), dim=1)
+                vals, idxs = torch.topk(dists, num_nn, dim=0, largest=False)
+                vals = vals.detach().cpu().numpy()
+                idxs = idxs.detach().cpu().numpy()
+                out_vals = (2-vals)/2.0
+            else:
+                dists = np.linalg.norm(self.global_descs - query, axis=1)
+                idxs = np.argsort(dists)[:num_nn]
+                out_vals = (2-vals)/2.0
+
         #print (f"Distances: {dists[idxs]}")
         print (f"Shortlist in: {time()-t:.2f} sec")
-        return idxs, (2-dists[idxs])/2.0
+        return idxs, out_vals
     
     def resort_shortlist(self, query, shortlist, criterion = 'num_inl', device='cpu', matching_method='smnn'):
         # Placeholder function for retrieving data
