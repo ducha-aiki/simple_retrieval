@@ -135,8 +135,8 @@ async def images(request: Request, background_tasks: BackgroundTasks):
             use_diffusion = payload["data"]["engine_options"]["diffusion"]
             if payload["data"]["query"]["value"]["prefix"] == "upload":
                 query_fname = os.path.join(engine.upload_dir, query_fname) # prepend the upload directory
-            elif payload["data"]["query"]["value"]["prefix"] == "oxford5k":
-                query_fname = os.path.join(engine.img_dir, query_fname) # prepend the image directory
+            elif payload["data"]["query"]["value"]["prefix"] == "vrg_retrieval_demo":
+                query_fname = os.path.join(engine.img_dir, query_fname).replace('vrg_retrieval_demo/vrg_retrieval_demo','vrg_retrieval_demo') # prepend the image directory
             try:
                 search_mode = payload["data"]["query"]["search_mode"]["id"]
             except KeyError:
@@ -199,7 +199,6 @@ async def images(request: Request, background_tasks: BackgroundTasks):
                 idxs = resorted_idxs[~irrelevant_mask]
                 scores = resorted_scores[~irrelevant_mask]
                 bboxes = resorted_bboxes[~irrelevant_mask]
-                print(len(idxs), len(scores), len(bboxes))
                 idxs_set = set(idxs)
                 rest_of_idxs = [i for i in shortlist_idxs if i not in idxs_set]
                 rest_of_scores = [shortlist_scores[i] for i, idx in enumerate(shortlist_idxs) if i not in idxs_set]
@@ -209,14 +208,16 @@ async def images(request: Request, background_tasks: BackgroundTasks):
         print (criterion, scores[:10])
         shortlist_idxs = shortlist_idxs.tolist()
         print (len(scores), len(bboxes))
-
-        output ={"data": {"images": [{"path": fnames[idx].replace(engine.config["input_dir"], ""),
+        indir1 = engine.config["input_dir"]
+        if not indir1.endswith('/'):
+            indir1+='/'
+        output ={"data": {"images": [{"path": fnames[idx].replace(indir1, "vrg_retrieval_demo/"),
                                     "overlays": {"rank": f"Rank: {str(int(i)+offset)}",
                                                  "score": f"{criterion}: {resorted_scores[i+offset]:.3g}, global_similarity: {shortlist_scores[shortlist_idxs.index(idx)]:.3g}",
                                                  "paths_over": convert_points_to_path(bboxes[i+offset]) if len(bboxes) > 0 else []},
  
                                        "output_information": { "text_info": f"{scores[i+offset]:.3f}"},                   
-                                    "prefix": "oxford5k"}
+                                    "prefix": "vrg_retrieval_demo"}
                                     for i, idx in enumerate(idxs[offset:offset+limit])]}}
         if "query" in payload["data"]:
             output["data"]["query_image"] = {"overlays": {"rank": "", "score": "Query image"}}

@@ -280,6 +280,21 @@ def get_scale_factor(H):
     return scale_factor
 
 
+def get_convex_hull_area(points):
+    # Ensure points are in the correct shape for cv2.convexHull (Nx1x2)
+    points = np.array(points, dtype=np.float32).reshape(-1, 1,  2)
+    hull = cv2.convexHull(points)
+    area = cv2.contourArea(hull)
+    return area
+
+def get_scale_factor_via_convex_hull(kpts1, kpts2):
+    area1 = get_convex_hull_area(kpts1)
+    area2 = get_convex_hull_area(kpts2)
+    area_ratio = area2 / area1
+    scale_factor = np.sqrt(area_ratio)
+    return scale_factor
+
+
 def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th": 3.0, "num_iter": 1000}):
     new_shortlist_scores = []
     Hs = []
@@ -289,35 +304,54 @@ def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th
             new_shortlist_scores.append(0)
             Hs.append(np.zeros((3, 3)))
             continue
-        H, inliers = cv2.findHomography(
-            mkpts1.detach().cpu().numpy(),
-            mkpts2.detach().cpu().numpy(),
-            cv2.USAC_MAGSAC,
-            config['inl_th'],
-            0.999,
-            config['num_iter']
-        )
-        inliers = inliers > 0
+        if criterion == 'scale_factor_min':
+            H, inliers = cv2.findHomography(
+                mkpts2.detach().cpu().numpy(),
+                mkpts1.detach().cpu().numpy(),
+                cv2.USAC_MAGSAC,
+                config['inl_th'],
+                0.999,
+                config['num_iter']
+            )
+            if H is not None:
+                H = np.linalg.inv(H)
+            else:
+                H = np.zeros((3, 3))
+        else:
+            H, inliers = cv2.findHomography(
+                mkpts1.detach().cpu().numpy(),
+                mkpts2.detach().cpu().numpy(),
+                cv2.USAC_MAGSAC,
+                config['inl_th'],
+                0.999,
+                config['num_iter']
+            )            
+        inliers = (inliers > 0).reshape(-1)
         num_inl = inliers.sum()
+        fail = False
         if H is None:
             H = np.zeros((3, 3))
+            fail = True
         if num_inl>50:
             if criterion == 'num_inliers':
                 new_shortlist_scores.append(num_inl)
             elif criterion == 'scale_factor_min':
-                scale_factor = get_scale_factor(H)
-                scale_factor = 1.0/scale_factor
-                if (scale_factor <= 0.12) or scale_factor > 8:
+                print (mkpts2.detach().cpu().numpy().shape, inliers.shape)
+                scale_factor = get_scale_factor_via_convex_hull(mkpts2.detach().cpu().numpy()[inliers],
+                                                mkpts1.detach().cpu().numpy()[inliers])
+                if (scale_factor <= 0.1) or scale_factor > 10:
                     scale_factor = 0.0
                 print (f"Scale factor: {scale_factor}, num_inliers: {num_inl}")
                 new_shortlist_scores.append(scale_factor)
             elif criterion == 'scale_factor_max':
-                scale_factor = get_scale_factor(H)
+                scale_factor = get_scale_factor_via_convex_hull(mkpts1.detach().cpu().numpy()[inliers],
+                                                mkpts2.detach().cpu().numpy()[inliers])
                 if (scale_factor <= 0.12) or scale_factor > 8:
                     scale_factor = 0.0
                 print (f"Scale factor: {scale_factor}, num_inliers: {num_inl}")
                 new_shortlist_scores.append(scale_factor)
         else:
+            print ("Too little inliers")
             if criterion == 'num_inliers':
                 new_shortlist_scores.append(num_inl)
             else:
