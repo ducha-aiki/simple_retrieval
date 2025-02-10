@@ -15,11 +15,11 @@ from typing import List, Tuple, Callable, Optional
 from PIL import Image
 from torch.utils.data import Dataset
 import h5py
-
+from scipy.sparse import csr_matrix
 from simple_retrieval.global_feature import get_dinov2salad, get_input_transform_siglip, get_input_transform_dinosalad, dataset_inference, siglip2
 from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir, match_query_to_db, spatial_scoring
 from simple_retrieval.pile_of_garbage import CustomImageFolder
-from simple_retrieval.manifold_diffusion import sim_kernel, normalize_connection_graph, topK_W, cg_diffusion
+from simple_retrieval.manifold_diffusion import sim_kernel, sim_kernel_torch, topK_to_csr, get_W_sparse, normalize_connection_graph, topK_W, cg_diffusion
 import cv2
 
 
@@ -117,14 +117,20 @@ class SimpleRetrieval:
         if os.path.exists(Wn_fname) and not self.config["force_recache"]:
             self.Wn = torch.load(Wn_fname)
         else:
-            self.Wn = self.get_Wn(self.global_descs.T.astype(np.float32), K = 100)
+            self.Wn = self.get_Wn(self.global_descs.T, K = 100)
             torch.save(self.Wn, Wn_fname)
         return 
 
-    def get_Wn(self, X, K = 100):
-        A = np.dot(X.T, X)
-        W = sim_kernel(A)
-        W = topK_W(W, K)
+    def get_Wn(self, X, K = 100, max_size = 1000):
+        print (f"Computing Wn for {X.shape} samples")
+        num_samples = X.shape[1]
+        if num_samples > max_size:
+            W = get_W_sparse(X, K)
+            W = W.minimum(W.T)
+        else:
+            A = np.dot(X.T, X)
+            W = sim_kernel(A)
+            W = topK_W(W, K).astype(np.float32)
         Wn = normalize_connection_graph(W)
         return Wn
 
