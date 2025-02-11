@@ -174,7 +174,7 @@ async def images(request: Request, background_tasks: BackgroundTasks):
                 print (f"Cropping image ({w, h}) to: {xmin, xmax, ymin, ymax}")
                 q_img = q_img[ymin:ymax, xmin:xmax]
             hq, wq = q_img.shape[:2]
-            num_nn = max(100, min((offset + limit)*10, 1000))
+            num_nn = max(300, min((offset + limit)*10, 1000))
             print (f'Searching for {num_nn} nearest neighbors')
             shortlist_idxs, shortlist_scores = engine.get_shortlist(q_img,
                                                                     num_nn=num_nn,
