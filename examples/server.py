@@ -42,7 +42,7 @@ MY_CAPABILITIES = {
                 "default": True,
             },
             {
-                "default": False,
+                "default": True,
                 "id": "paths_over",
                 "label": "Path overlay",
                 "type": "paths"
