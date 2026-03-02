@@ -16,15 +16,19 @@ from PIL import Image
 from torch.utils.data import Dataset
 import h5py
 from scipy.sparse import csr_matrix
-from simple_retrieval.global_feature import get_dinov2salad, get_input_transform_siglip, get_input_transform_dinosalad, dataset_inference, siglip2
-from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir, match_query_to_db, spatial_scoring
+from simple_retrieval.global_feature import get_dinov2salad, get_input_transform_siglip, get_input_transform_dinosalad, get_input_transform_dinov3large, dataset_inference, siglip2, DINOv3Large, DINOv3LargeGeM
+from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir, detect_clidd_single, detect_clidd_dir, match_query_to_db, spatial_scoring
 from simple_retrieval.pile_of_garbage import CustomImageFolder
 from simple_retrieval.manifold_diffusion import sim_kernel, sim_kernel_torch, topK_to_csr, get_W_sparse, normalize_connection_graph, topK_W, cg_diffusion
 import cv2
+# VLM resorting — imported lazily to keep startup cost low
+_vlm_resort = None
 
 
 def get_default_config():
     conf = {"local_features": "xfeat",
+            "clidd_dir": "./CLIDD",
+            "quantize_local_desc": False,
             "global_features": "dinosalad",
             "inl_th": 2.0,
             "num_iter": 2000,
@@ -40,8 +44,11 @@ def get_default_config():
             "ransac_type": "homography",
             "matching_method": "smnn",
             "num_nn": 100,
-            "use_diffusion": False,
-            "resort_criterion": "scale_factor_max"}
+            "resort_criterion": "scale_factor_max",
+            # VLM resorting options (used when resort_criterion starts with 'vlm_')
+            "vlm_model": "qwen2vl-2b",   # model shortcut or full HF path
+            "vlm_bbox": None,             # [x1,y1,x2,y2] query ROI, or None
+            }
     return conf
     
 
@@ -56,6 +63,12 @@ class SimpleRetrieval:
         if config.get("global_features") == "dinosalad":
             self.global_model = get_dinov2salad(device=dev, dtype=dtype).eval()
             self.global_transform = get_input_transform_dinosalad((img_size, img_size))
+        elif config.get("global_features") == "dinov3large":
+            self.global_model = DINOv3Large(device=dev).to(device=dev, dtype=dtype).eval()
+            self.global_transform = get_input_transform_dinov3large((img_size, img_size))
+        elif config.get("global_features") == "dinov3large_gem":
+            self.global_model = DINOv3LargeGeM(device=dev).to(device=dev, dtype=dtype).eval()
+            self.global_transform = get_input_transform_dinov3large((img_size, img_size))
         else:
             self.global_model  = siglip2(device=dev).eval()
             self.global_transform = get_input_transform_siglip((384, 384))
@@ -88,6 +101,8 @@ class SimpleRetrieval:
 
     def get_local_feature_dir(self, img_dir):
         local_desc_name = f"{self.config['local_features']}_{self.config['num_local_features']}"
+        if self.config.get("quantize_local_desc", False):
+            local_desc_name += "_uint8"
         return os.path.join(self.get_cache_dir_name(img_dir), local_desc_name)
 
     def create_global_descriptor_index(self, img_dir, index_dir):
@@ -100,7 +115,7 @@ class SimpleRetrieval:
         
         if os.path.exists(global_index_fname) and not self.config["force_recache"]:
             print (f"Loading global index from {global_index_fname}")
-            self.global_descs = torch.load(global_index_fname)
+            self.global_descs = torch.load(global_index_fname, weights_only=False)
            
         else:
             print (f"Creating global index from images in: {img_dir}")
@@ -111,11 +126,11 @@ class SimpleRetrieval:
                                                         num_workers=self.config["num_workers"])
             torch.save(self.global_descs, global_index_fname)
             print (f"Global index saved to:  {global_index_fname}")
-            self.global_descs = torch.load(global_index_fname)
+            self.global_descs = torch.load(global_index_fname, weights_only=False)
         print (self.global_descs.shape, self.global_descs.dtype)
         print (self.global_descs[0])
         if os.path.exists(Wn_fname) and not self.config["force_recache"]:
-            self.Wn = torch.load(Wn_fname)
+            self.Wn = torch.load(Wn_fname, weights_only=False)
         else:
             self.Wn = self.get_Wn(self.global_descs.T, K = 100)
             torch.save(self.Wn, Wn_fname)
@@ -143,7 +158,7 @@ class SimpleRetrieval:
             if self.config["local_features"] == "sift":
                 detect_sift_dir(fnames_list, feature_dir=self.local_feature_dir, num_feats=self.config["num_local_features"], device=self.config["device"],
                                 resize_to=self.config["local_desc_image_size"])
-            if self.config["local_features"] == "xfeat":
+            elif self.config["local_features"] == "xfeat":
                 detect_xfeat_dir(fnames_list,
                                  feature_dir=self.local_feature_dir,
                                  num_feats=self.config["num_local_features"],
@@ -151,7 +166,19 @@ class SimpleRetrieval:
                                  device=self.config["device"],
                                  batch_size=self.config["local_desc_batch_size"],
                                  num_workers=self.config["num_workers"],
-                                 pin_memory=False)
+                                 pin_memory=False,
+                                 quantize=self.config["quantize_local_desc"])
+            elif self.config["local_features"] == "clidd":
+                detect_clidd_dir(fnames_list,
+                                 feature_dir=self.local_feature_dir,
+                                 num_feats=self.config["num_local_features"],
+                                 resize_to=self.config["local_desc_image_size"],
+                                 device=self.config["device"],
+                                 batch_size=self.config["local_desc_batch_size"],
+                                 num_workers=self.config["num_workers"],
+                                 pin_memory=False,
+                                 clidd_dir=self.config["clidd_dir"],
+                                 quantize=self.config["quantize_local_desc"])
             print (f"{self.config['local_features']} index of created from images in: {img_dir} in {time()-t:.2f} sec, saved to {self.local_feature_dir}")
         else:
             print (f"Local index already exists in {self.local_feature_dir}")
@@ -214,15 +241,42 @@ class SimpleRetrieval:
             else:
                 dists = np.linalg.norm(self.global_descs - query, axis=1)
                 idxs = np.argsort(dists)[:num_nn]
-                out_vals = (2-vals)/2.0
+                out_vals = (2-dists[idxs])/2.0
 
         #print (f"Distances: {dists[idxs]}")
         print (f"Shortlist in: {time()-t:.2f} sec")
         return idxs, out_vals
     
-    def resort_shortlist(self, query, shortlist, criterion = 'num_inl', device='cpu', matching_method='smnn'):
-        # Placeholder function for retrieving data
-        ### First, we need to get the local descriptors of the query image
+    def resort_shortlist(self, query, shortlist, criterion='num_inliers', device='cpu',
+                         matching_method='smnn', bbox=None, vlm_model=None,
+                         vlm_collective=True):
+        """Re-rank a shortlist of retrieved images.
+
+        For geometry-based criteria ('num_inliers', 'scale_factor_max',
+        'scale_factor_min') local features + RANSAC are used.
+
+        For VLM-based criteria ('vlm_zoom_in', 'vlm_zoom_out', 'vlm_relevant')
+        a vision-language model is used instead; in this case `corners_norm` is
+        returned as None.
+
+        Args:
+            query:          Query image as np.ndarray (H,W,3) RGB.
+            shortlist:      1-D int array of DB indices from get_shortlist.
+            criterion:      Scoring criterion (see above).
+            device:         'cuda' or 'cpu'.
+            matching_method: Local feature matching method (geometry path only).
+            bbox:           Optional [x1,y1,x2,y2] query ROI for VLM path.
+            vlm_model:      VLM model name override; falls back to config value.
+
+        Returns:
+            sorted_shortlist (np.ndarray), scores (np.ndarray), corners_norm
+        """
+        if criterion.startswith("vlm_"):
+            return self._resort_shortlist_vlm(
+                query, shortlist, criterion=criterion, device=device,
+                bbox=bbox, vlm_model=vlm_model, collective=vlm_collective)
+
+        # --- Geometry path ---
         new_shortlist_scores = []
         matching_keypoints = []
         dtype = torch.float16 if 'cuda' in str(device) else torch.float32
@@ -232,14 +286,19 @@ class SimpleRetrieval:
             kpt, descs, lafs1 = detect_sift_single(query,
                                                    num_feats=self.config["num_local_features"],
                                                    resize_to=self.config["local_desc_image_size"])
-        if self.config["local_features"] == "xfeat":
+        elif self.config["local_features"] == "xfeat":
             kpt, descs, lafs1 = detect_xfeat_single(query,
                                                     num_feats=self.config["num_local_features"],
                                                     resize_to=self.config["local_desc_image_size"])
+        elif self.config["local_features"] == "clidd":
+            kpt, descs, lafs1 = detect_clidd_single(query,
+                                                    num_feats=self.config["num_local_features"],
+                                                    resize_to=self.config["local_desc_image_size"],
+                                                    clidd_dir=self.config["clidd_dir"])
         descs = descs.to(device, dtype)
         lafs1 = lafs1.to(device, dtype)
         fnames = [self.ds.samples[i] for i in shortlist]
-        tt=time()
+        tt = time()
         with torch.inference_mode():
             matching_keypoints, hw2_s = match_query_to_db(descs, lafs1, hw1,
                                                self.local_feature_dir,
@@ -247,27 +306,71 @@ class SimpleRetrieval:
                                                feature_name=self.config['local_features'],
                                                matching_method=matching_method,
                                                device=torch.device(device))
-        print (f"Matching {matching_method} in {time()-tt:.4f} sec")
-        tt=time()
-        new_shortlist_scores, Hs = spatial_scoring(matching_keypoints, criterion=criterion, config=self.config)
-        ### 
-        topleft = np.array([0, 0, 1])
-        bottomleft = np.array([0, hq, 1])
-        topright = np.array([wq, 0, 1])
+        print(f"Matching {matching_method} in {time()-tt:.4f} sec")
+        tt = time()
+        new_shortlist_scores, Hs = spatial_scoring(
+            matching_keypoints, criterion=criterion, config=self.config)
+
+        # Build normalised corner projections for visualisation
+        topleft     = np.array([0,  0,  1])
+        bottomleft  = np.array([0,  hq, 1])
+        topright    = np.array([wq, 0,  1])
         bottomright = np.array([wq, hq, 1])
         corners = np.stack([topleft, bottomleft, bottomright, topright, topleft], axis=0)
-        print (corners.shape)
-        print (np.array(Hs).shape)
-        corners = np.dot(np.array(Hs), corners.T).T
-        corners = corners / corners[:, 2][:, None]
-        corners = corners[:, :2].transpose(2, 0, 1)
-        print (corners.shape, np.array(hw2_s).shape)
-        wh2 = np.array(hw2_s)[:,::-1][:, None]
-        corners_norm = corners / wh2
-        print (corners_norm.shape)
-        print (f"RANSAC in {time()-tt:.4f} sec")
+        Hs_arr = np.array(Hs)   # (N,3,3)
+        proj = np.einsum("nij,kj->nki", Hs_arr, corners)  # (N,5,3)
+        z = proj[:, :, 2:3]
+        # Avoid divide-by-zero for failed homographies
+        safe_z = np.where(np.abs(z) < 1e-8, 1.0, z)
+        proj_norm = proj[:, :, :2] / safe_z
+        wh2 = np.array(hw2_s)[:, ::-1][:, np.newaxis, :]   # (N,1,2)
+        corners_norm = proj_norm / np.where(wh2 == 0, 1.0, wh2)
+
+        print(f"RANSAC in {time()-tt:.4f} sec")
         sorted_idxs = np.argsort(new_shortlist_scores)[::-1]
-        return shortlist[sorted_idxs], new_shortlist_scores[sorted_idxs], corners_norm[sorted_idxs]
+        return (shortlist[sorted_idxs],
+                np.array(new_shortlist_scores)[sorted_idxs],
+                corners_norm[sorted_idxs])
+
+    def _resort_shortlist_vlm(self, query, shortlist, criterion='vlm_zoom_in',
+                               device='cuda', bbox=None, vlm_model=None,
+                               collective=True):
+        """VLM-based resorting. Returns (sorted_shortlist, scores, None).
+
+        Args:
+            collective: If True (default), send all candidates in one/few VLM
+                        calls with a disk cache (faster on repeated queries).
+                        If False, run one VLM call per candidate (no caching).
+        """
+        model_name = vlm_model or self.config.get("vlm_model", "qwen2vl-2b")
+        query_bbox = bbox if bbox is not None else self.config.get("vlm_bbox")
+        if collective:
+            from simple_retrieval.llms import resort_shortlist_vlm_collective as _fn
+            cache_dir = self.config.get("vlm_cache_dir", "./tmp/vlm_cache")
+            max_per = self.config.get("vlm_max_images_per_call", 8)
+            sorted_sl, scores = _fn(
+                query_img=query,
+                shortlist=shortlist,
+                db_fnames=self.ds.samples,
+                model_name=model_name,
+                criterion=criterion,
+                bbox=query_bbox,
+                device=device,
+                max_images_per_call=max_per,
+                cache_dir=cache_dir,
+            )
+        else:
+            from simple_retrieval.llms import resort_shortlist_vlm as _fn
+            sorted_sl, scores = _fn(
+                query_img=query,
+                shortlist=shortlist,
+                db_fnames=self.ds.samples,
+                model_name=model_name,
+                criterion=criterion,
+                bbox=query_bbox,
+                device=device,
+            )
+        return sorted_sl, scores, None
 
 def main():
     # Example usage of the retrieve_data function
@@ -289,9 +392,11 @@ def main():
     fnames = r.ds.samples  
     q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
     with torch.inference_mode():
-        idxs, scores = r.resort_shortlist(q_img, shortlist_idxs, matching_method=r.config["matching_method"],
-                                 criterion=r.config["resort_criterion"])
-    print ([fnames[i] for i in idxs], scores)  
+        idxs, scores, corners_norm = r.resort_shortlist(
+            q_img, shortlist_idxs,
+            matching_method=r.config["matching_method"],
+            criterion=r.config["resort_criterion"])
+    print([fnames[i] for i in idxs], scores)
 
 if __name__ == "__main__":
     main()
