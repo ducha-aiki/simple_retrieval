@@ -305,6 +305,16 @@ class _DINOv3LargeBackbone(nn.Module):
         self.num_register_tokens = self.model.config.num_register_tokens
         self.num_channels = 1024
 
+    def to(self, *args, **kwargs):
+        """Accept device changes but always preserve bfloat16.
+
+        highlevel.py calls model.to(dev, float16) on every query — this
+        override strips dtype changes so float16 never overwrites our bfloat16.
+        """
+        args = tuple(a for a in args if not isinstance(a, torch.dtype))
+        kwargs.pop('dtype', None)
+        return super().to(*args, **kwargs)
+
     def get_outputs(self, x):
         from transformers.feature_extraction_utils import BatchFeature
         # Always run in bfloat16 regardless of caller dtype
