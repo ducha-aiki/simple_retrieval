@@ -300,7 +300,7 @@ class _DINOv3LargeBackbone(nn.Module):
         super().__init__()
         from transformers import AutoModel
         self.model = AutoModel.from_pretrained(
-            DINOV3_LARGE_HF_ID, torch_dtype=torch.bfloat16
+            DINOV3_LARGE_HF_ID, dtype=torch.bfloat16
         ).eval().to(device)
         self.num_register_tokens = self.model.config.num_register_tokens
         self.num_channels = 1024
@@ -404,4 +404,5 @@ def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_w
     # Placeholder function for creating a global descriptor index
     global_descs = np.concatenate(global_desc, axis=0)
     print (f"{len(global_descs)} global descs in {time()-t:.2f} sec")
+    print (f"First 5 descriptors (dtype={global_descs.dtype}):\n{global_descs[:5]}")
     return global_descs
