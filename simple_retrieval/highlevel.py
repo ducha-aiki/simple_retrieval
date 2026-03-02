@@ -27,7 +27,6 @@ _vlm_resort = None
 
 def get_default_config():
     conf = {"local_features": "xfeat",
-            "clidd_dir": "./CLIDD",
             "quantize_local_desc": False,
             "global_features": "dinosalad",
             "inl_th": 2.0,
@@ -103,7 +102,7 @@ class SimpleRetrieval:
         local_desc_name = f"{self.config['local_features']}_{self.config['num_local_features']}"
         if self.config.get("quantize_local_desc", False):
             local_desc_name += "_uint8"
-        return os.path.join(self.get_cache_dir_name(img_dir), local_desc_name)
+        return os.path.join(self.config['local_desc_dir'], local_desc_name)
 
     def create_global_descriptor_index(self, img_dir, index_dir):
         """Creates a global descriptor index from a directory of images."""
@@ -177,7 +176,6 @@ class SimpleRetrieval:
                                  batch_size=self.config["local_desc_batch_size"],
                                  num_workers=self.config["num_workers"],
                                  pin_memory=False,
-                                 clidd_dir=self.config["clidd_dir"],
                                  quantize=self.config["quantize_local_desc"])
             print (f"{self.config['local_features']} index of created from images in: {img_dir} in {time()-t:.2f} sec, saved to {self.local_feature_dir}")
         else:
@@ -294,7 +292,7 @@ class SimpleRetrieval:
             kpt, descs, lafs1 = detect_clidd_single(query,
                                                     num_feats=self.config["num_local_features"],
                                                     resize_to=self.config["local_desc_image_size"],
-                                                    clidd_dir=self.config["clidd_dir"])
+                                                    device=torch.device(device))
         descs = descs.to(device, dtype)
         lafs1 = lafs1.to(device, dtype)
         fnames = [self.ds.samples[i] for i in shortlist]

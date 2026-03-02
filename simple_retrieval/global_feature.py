@@ -400,7 +400,10 @@ def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_w
     dl = DataLoader(ds, batch_size=bs, num_workers=num_workers, pin_memory=True)
     with torch.inference_mode():
         for img, _ in tqdm(dl):
-            global_desc.append(model(img.to(dev, dtype)).cpu())
+            batch_desc = model(img.to(dev, dtype)).cpu()
+            if len(global_desc) == 0:
+                print(f"First batch descriptors (dtype={batch_desc.dtype}, shape={batch_desc.shape}):\n{batch_desc[:5]}")
+            global_desc.append(batch_desc)
     # Placeholder function for creating a global descriptor index
     global_descs = np.concatenate(global_desc, axis=0)
     print (f"{len(global_descs)} global descs in {time()-t:.2f} sec")
