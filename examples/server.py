@@ -16,7 +16,7 @@ engine = None
 MY_CAPABILITIES = {
     "data": {
         "engine_options": [
-        {
+            {
                 "default": "lightglue",
                 "id": "matching_method",
                 "label": "matching_method",
@@ -26,12 +26,39 @@ MY_CAPABILITIES = {
                     "lightglue"
                 ]
             },
-                {
+            {
                 "default": True,
                 "id": "diffusion",
                 "label": "diffusion",
                 "type": "bool",
-           
+            },
+            {
+                "default": "homography",
+                "id": "zooming_alg",
+                "label": "Zooming algorithm",
+                "type": "option",
+                "values": [
+                    "homography",
+                    "vlm"
+                ]
+            },
+            {
+                "default": "qwen2vl-2b",
+                "id": "vlm_model",
+                "label": "VLM model",
+                "type": "option",
+                "values": [
+                    "qwen2vl-2b",
+                    "qwen2vl-7b",
+                    "qwen2.5vl-3b",
+                    "qwen2.5vl-7b",
+                    "gemma3-4b",
+                    "gemma3-12b",
+                    "gemma3-27b",
+                    "deepseek-vl-1.3b",
+                    "deepseek-vl-7b",
+                    "paligemma-3b"
+                ]
             },
         ],
         "images_overlays": [
@@ -144,11 +171,19 @@ async def images(request: Request, background_tasks: BackgroundTasks):
             print(query_fname)
             criterion = engine.config["resort_criterion"]
             crop_needed = False
+            zooming_alg = payload["data"]["engine_options"].get("zooming_alg", "homography")
+            vlm_model = payload["data"]["engine_options"].get("vlm_model", "qwen2vl-2b")
             if search_mode == "zoom-in":
-                criterion = "scale_factor_max"
+                if zooming_alg == "vlm":
+                    criterion = "vlm_zoom_in"
+                else:
+                    criterion = "scale_factor_max"
                 crop_needed = True
             elif search_mode == "zoom-out":
-                criterion = "scale_factor_min"
+                if zooming_alg == "vlm":
+                    criterion = "vlm_zoom_out"
+                else:
+                    criterion = "scale_factor_min"
                 crop_needed = True
             elif search_mode == "similarity":
                 criterion = "skip"
@@ -186,6 +221,15 @@ async def images(request: Request, background_tasks: BackgroundTasks):
                 resorted_scores = shortlist_scores
                 resorted_idxs = shortlist_idxs
                 bboxes = [[] for _ in range(len(idxs))]
+            elif criterion.startswith("vlm_"):
+                resorted_idxs, resorted_scores, _ = engine.resort_shortlist(
+                    q_img, shortlist_idxs,
+                    criterion=criterion,
+                    device=engine.config["device"],
+                    vlm_model=vlm_model)
+                idxs = list(resorted_idxs)
+                scores = list(resorted_scores)
+                bboxes = [[]] * len(idxs)
             else:
                 matching_method = payload["data"]["engine_options"]["matching_method"]
                 with torch.inference_mode():
@@ -201,7 +245,7 @@ async def images(request: Request, background_tasks: BackgroundTasks):
                 bboxes = resorted_bboxes[~irrelevant_mask]
                 idxs_set = set(idxs)
                 rest_of_idxs = [i for i in shortlist_idxs if i not in idxs_set]
-                rest_of_scores = [shortlist_scores[i] for i, idx in enumerate(shortlist_idxs) if i not in idxs_set]
+                rest_of_scores = [shortlist_scores[j] for j, idx in enumerate(shortlist_idxs) if idx not in idxs_set]
                 idxs = list(idxs) + rest_of_idxs
                 scores = list(scores) + rest_of_scores
                 bboxes = list(bboxes) + [[]]*len(rest_of_scores)
@@ -213,7 +257,7 @@ async def images(request: Request, background_tasks: BackgroundTasks):
             indir1+='/'
         output ={"data": {"images": [{"path": fnames[idx].replace(indir1, "vrg_retrieval_demo/"),
                                     "overlays": {"rank": f"Rank: {str(int(i)+offset)}",
-                                                 "score": f"{criterion}: {resorted_scores[i+offset]:.3g}, global_similarity: {shortlist_scores[shortlist_idxs.index(idx)]:.3g}",
+                                                 "score": f"{criterion}: {scores[i+offset]:.3g}, global_similarity: {shortlist_scores[shortlist_idxs.index(idx)]:.3g}",
                                                  "paths_over": convert_points_to_path(bboxes[i+offset]) if len(bboxes) > 0 else []},
  
                                        "output_information": { "text_info": f"{scores[i+offset]:.3f}"},                   
@@ -239,6 +283,9 @@ if __name__ == "__main__":
     parser.add_argument('--global_features', type=str, default='dinosalad')
     parser.add_argument('--local_features', type=str, default='xfeat')
     parser.add_argument('--local_desc_dir', type=str, default='./tmp/local_desc')
+    parser.add_argument('--quantize_local_desc', action='store_true',
+                        help='Store local descriptors as uint8 (normalize→×512→clip[0,255]). '
+                             'Dequantization is applied automatically on load.')
     parser.add_argument('--resort_criterion', type=str, default='scale_factor_max', choices=['scale_factor_max', 'scale_factor_min', 'num_inliers'])	
     parser.add_argument('--num_nn', type=int, default=10)
     parser.add_argument('--inl_th', type=float, default=3.0)

@@ -66,6 +66,7 @@ class CustomImageFolderFromFileList(CustomImageFolder):
         """
         self.transform = transform
         self.samples = file_list
+        self.extensions = (".jpg", ".jpeg", ".png", ".bmp", ".gif")
     def _is_valid_file(self, filename: str) -> bool:
         """Checks if a file is a valid image file based on its extension."""
         return filename.lower().endswith(self.extensions)
@@ -131,7 +132,13 @@ class H5LocalFeatureDataset(torch.utils.data.Dataset):
             self.descriptors_dataset = h5py.File(os.path.join(self.dir_path, "descriptors.h5"), 'r')
             self.lafs_dataset = h5py.File(os.path.join(self.dir_path, "lafs.h5"), 'r')
             self.hw_dataset = h5py.File(os.path.join(self.dir_path, "hw.h5"), 'r')
-        return torch.from_numpy(self.descriptors_dataset[key][...]), torch.from_numpy(self.lafs_dataset[key][...]), torch.from_numpy(self.hw_dataset[key][...]), key
+        descs = torch.from_numpy(self.descriptors_dataset[key][...])
+        if descs.dtype == torch.uint8:
+            descs = descs.float() / 512.0
+        lafs = torch.from_numpy(self.lafs_dataset[key][...])
+        if lafs.dtype == torch.float16:
+            lafs = lafs.float()
+        return descs, lafs, torch.from_numpy(self.hw_dataset[key][...]), key
 
     def __len__(self):
         return self.dataset_len
