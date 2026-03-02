@@ -28,9 +28,12 @@ def main(config=None, input_dir=None, global_desc_dir=None, local_desc_dir=None,
     fnames = r.ds.samples  
     q_img = cv2.cvtColor(cv2.imread(query_fname), cv2.COLOR_BGR2RGB)
     with torch.inference_mode():
-        idxs, scores = r.resort_shortlist(q_img, shortlist_idxs, matching_method=r.config["matching_method"],
-                                 criterion=r.config["resort_criterion"], device=r.config["device"])
-    print ([fnames[i] for i in idxs[:10]], scores[:10])
+        idxs, scores, corners_norm = r.resort_shortlist(
+            q_img, shortlist_idxs,
+            matching_method=r.config["matching_method"],
+            criterion=r.config["resort_criterion"],
+            device=r.config["device"])
+    print([fnames[i] for i in idxs[:10]], scores[:10])
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(5, 5, figsize=(20, 20))
     ax[0, 0].imshow(q_img)

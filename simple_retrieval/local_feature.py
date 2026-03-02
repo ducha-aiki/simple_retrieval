@@ -10,6 +10,7 @@ import kornia.feature as KF
 from kornia_moons.feature import laf_from_opencv_SIFT_kpts
 from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset
 from simple_retrieval.xfeat import XFeat, LighterGlue
+from simple_retrieval.clidd import CLIDD
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from kornia_moons.feature import kornia_matches_from_cv2
@@ -24,6 +25,11 @@ def sift_to_rootsift(x: torch.Tensor, eps=1e-6) -> torch.Tensor:
     x = torch.nn.functional.normalize(x, p=1, dim=-1, eps=eps)
     x.clip_(min=eps).sqrt_()
     return torch.nn.functional.normalize(x, p=2, dim=-1, eps=eps)
+
+
+def quantize_descriptors(descs: np.ndarray) -> np.ndarray:
+    """L2-normalised float descriptors → uint8 (scale=512, clipped to [0,255])."""
+    return (descs * 512).clip(0, 255).astype(np.uint8)
 
 
 def get_input_xfeat_transform(image_size=None):
@@ -112,7 +118,8 @@ def detect_xfeat_dir(img_fnames,
                 feature_dir='.featureout', resize_to=(600, 800),
                 num_workers=1,
                 batch_size=1,
-                pin_memory=False):
+                pin_memory=False,
+                quantize=False):
 
     model = XFeat(top_k=num_feats, detection_threshold=0.0)
     if not os.path.isdir(feature_dir):
@@ -145,12 +152,86 @@ def detect_xfeat_dir(img_fnames,
                     desc_dim = descriptors.shape[-1]
                     kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
                     descriptors = descriptors.reshape(-1, desc_dim).detach().cpu().numpy()
-                    f_laf[key] = lafs1.detach().cpu().numpy()
+                    lafs_np = lafs1.detach().cpu().numpy()
+                    if quantize:
+                        descriptors = quantize_descriptors(descriptors)
+                        lafs_np = lafs_np.astype(np.float16)
+                        kpts = kpts.astype(np.float16)
+                    f_laf[key] = lafs_np
                     f_kp[key] = kpts
                     f_desc[key] = descriptors
                     f_hw[key] = np.array([hs[i], ws[i]])
             print ("Done")
     return
+
+def detect_clidd_single(img, num_feats=2048, resize_to=(800, 600), weights_path=None, device=torch.device('cuda')):
+    model = CLIDD(cfg='E128', top_k=num_feats, score=-1e9, weights_path=weights_path).eval().to(device)
+    hw1 = torch.tensor(img.shape[:2])
+    if resize_to:
+        img = cv2.resize(img, resize_to)
+        hw1_new = torch.tensor(img.shape[:2], device=device)
+    img_t = torch.from_numpy(img).float().permute(2, 0, 1)[None].to(device) / 255.0
+    res = model(img_t)
+    keypoints = res[0]['keypoints']   # (N, 2)
+    descriptors = res[0]['descriptors']  # (N, 128)
+    lafs1 = K.feature.laf_from_center_scale_ori(keypoints.reshape(1, -1, 2))
+    if resize_to:
+        lafs1[:, :, 0, :] *= hw1[1] / hw1_new[1]
+        lafs1[:, :, 1, :] *= hw1[0] / hw1_new[0]
+    kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
+    return kpts, descriptors, lafs1
+
+
+def detect_clidd_dir(img_fnames,
+                     num_feats=2048,
+                     device=torch.device('cpu'),
+                     feature_dir='.featureout', resize_to=(600, 800),
+                     num_workers=1,
+                     batch_size=1,
+                     pin_memory=False,
+                     weights_path=None,
+                     quantize=False):
+    model = CLIDD(cfg='E128', top_k=num_feats, score=-1e9, weights_path=weights_path).eval()
+    if not os.path.isdir(feature_dir):
+        os.makedirs(feature_dir)
+    ds = CustomImageFolderFromFileList(img_fnames,
+                                       transform=get_input_xfeat_transform(resize_to))
+    dev = device
+    dtype = torch.float16 if 'cuda' in str(device) else torch.float32
+    dl = DataLoader(ds,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    collate_fn=collate_with_string,
+                    persistent_workers=True, pin_memory=pin_memory)
+    model = model.to(device, dtype)
+    with h5py.File(f'{feature_dir}/lafs.h5', mode='w') as f_laf, \
+            h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+            h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
+            h5py.File(f'{feature_dir}/hw.h5', mode='w') as f_hw:
+        for img_batch, hs, ws, fnames in tqdm(dl):
+            res = model(img_batch.to(dev, dtype))
+            for i, img_path in enumerate(fnames):
+                key = img_path
+                keypoints = res[i]['keypoints']
+                descriptors = res[i]['descriptors']
+                lafs1 = K.feature.laf_from_center_scale_ori(keypoints.reshape(1, -1, 2))
+                if resize_to:
+                    lafs1[:, :, 0, :] *= ws[i] / resize_to[1]
+                    lafs1[:, :, 1, :] *= hs[i] / resize_to[0]
+                desc_dim = descriptors.shape[-1]
+                kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
+                descriptors = descriptors.reshape(-1, desc_dim).detach().cpu().numpy()
+                lafs_np = lafs1.detach().cpu().numpy()
+                if quantize:
+                    descriptors = quantize_descriptors(descriptors)
+                    lafs_np = lafs_np.astype(np.float16)
+                    kpts = kpts.astype(np.float16)
+                f_laf[key] = lafs_np
+                f_kp[key] = kpts
+                f_desc[key] = descriptors
+                f_hw[key] = np.array([hs[i], ws[i]])
+        print("Done")
+
 
 def get_matching_keypoints(kp1, kp2, idxs):
     mkpts1 = kp1[idxs[:, 0]]
@@ -298,8 +379,7 @@ def get_scale_factor_via_convex_hull(kpts1, kpts2):
 def spatial_scoring(matching_keypoints, criterion='num_inliers', config={"inl_th": 3.0, "num_iter": 1000}):
     new_shortlist_scores = []
     Hs = []
-    for i, idx in tqdm(enumerate(matching_keypoints)):
-        mkpts1, mkpts2 = matching_keypoints[i]
+    for i, (mkpts1, mkpts2) in enumerate(tqdm(matching_keypoints)):
         if len(mkpts1) < 50:
             new_shortlist_scores.append(0)
             Hs.append(np.zeros((3, 3)))

@@ -287,6 +287,85 @@ class siglip2(nn.Module):
             features = outputs.pooler_output 
         return nn.functional.normalize(features, p=2, dim=-1)
 
+DINOV3_LARGE_HF_ID = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+
+
+class _DINOv3LargeBackbone(nn.Module):
+    """Shared backbone for DINOv3 ViT-L/16. Loaded once, reused by both pooling heads.
+
+    Always runs in bfloat16: float16 causes NaN in ViT-L attention (overflow).
+    bfloat16 has the same dynamic range as float32, making it safe for large ViTs.
+    """
+    def __init__(self, device='cpu'):
+        super().__init__()
+        from transformers import AutoModel
+        self.model = AutoModel.from_pretrained(
+            DINOV3_LARGE_HF_ID, dtype=torch.bfloat16
+        ).eval().to(device)
+        self.num_register_tokens = self.model.config.num_register_tokens
+        self.num_channels = 1024
+
+    def to(self, *args, **kwargs):
+        """Accept device changes but always preserve bfloat16.
+
+        highlevel.py calls model.to(dev, float16) on every query — this
+        override strips dtype changes so float16 never overwrites our bfloat16.
+        """
+        args = tuple(a for a in args if not isinstance(a, torch.dtype))
+        kwargs.pop('dtype', None)
+        return super().to(*args, **kwargs)
+
+    def get_outputs(self, x):
+        from transformers.feature_extraction_utils import BatchFeature
+        # Always run in bfloat16 regardless of caller dtype
+        inp = BatchFeature(data={"pixel_values": x}, tensor_type='pt').to(x.device, torch.bfloat16)
+        return self.model(**inp)
+
+
+class DINOv3Large(_DINOv3LargeBackbone):
+    """DINOv3 ViT-L/16 — CLS token descriptor (dim=1024).
+
+    Register tokens are not included in the descriptor.
+    """
+    def forward(self, x):
+        outputs = self.get_outputs(x)
+        cls = outputs.pooler_output  # [B, 1024] — CLS only
+        return nn.functional.normalize(cls.float(), p=2, dim=-1)
+
+
+class DINOv3LargeGeM(_DINOv3LargeBackbone):
+    """DINOv3 ViT-L/16 — GeM pooling over patch tokens (dim=1024).
+
+    CLS and register tokens are excluded. GeM exponent p defaults to 3.
+    """
+    def __init__(self, device='cpu', p=3.0):
+        super().__init__(device=device)
+        self.p = p
+
+    def forward(self, x):
+        outputs = self.get_outputs(x)
+        # last_hidden_state: [B, 1 + num_registers + N_patches, D]
+        patch_tokens = outputs.last_hidden_state[:, 1 + self.num_register_tokens:, :].float()
+        gem = patch_tokens.clamp(min=1e-6).pow(self.p).mean(dim=1).pow(1.0 / self.p)  # [B, D]
+        return nn.functional.normalize(gem, p=2, dim=-1)
+
+
+def get_input_transform_dinov3large(image_size=None):
+    # DINOv3 uses the same ImageNet normalisation as DINOv2
+    MEAN = [0.485, 0.456, 0.406]; STD = [0.229, 0.224, 0.225]
+    if image_size:
+        return T.Compose([
+            T.Resize(image_size, interpolation=T.InterpolationMode.BILINEAR),
+            T.ToTensor(),
+            T.Normalize(mean=MEAN, std=STD)
+        ])
+    else:
+        return T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=MEAN, std=STD)
+        ])
+
+
 def get_dinov2salad(device='cpu', dtype=torch.float32):
     """
     This function returns a DINOv2 + SALAD model.
@@ -321,8 +400,12 @@ def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_w
     dl = DataLoader(ds, batch_size=bs, num_workers=num_workers, pin_memory=True)
     with torch.inference_mode():
         for img, _ in tqdm(dl):
-            global_desc.append(model(img.to(dev, dtype)).cpu())
+            batch_desc = model(img.to(dev, dtype)).cpu()
+            if len(global_desc) == 0:
+                print(f"First batch descriptors (dtype={batch_desc.dtype}, shape={batch_desc.shape}):\n{batch_desc[:5]}")
+            global_desc.append(batch_desc)
     # Placeholder function for creating a global descriptor index
     global_descs = np.concatenate(global_desc, axis=0)
     print (f"{len(global_descs)} global descs in {time()-t:.2f} sec")
+    print (f"First 5 descriptors (dtype={global_descs.dtype}):\n{global_descs[:5]}")
     return global_descs
