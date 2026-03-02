@@ -291,17 +291,24 @@ DINOV3_LARGE_HF_ID = "facebook/dinov3-vitl16-pretrain-lvd1689m"
 
 
 class _DINOv3LargeBackbone(nn.Module):
-    """Shared backbone for DINOv3 ViT-L/16. Loaded once, reused by both pooling heads."""
+    """Shared backbone for DINOv3 ViT-L/16. Loaded once, reused by both pooling heads.
+
+    Always runs in bfloat16: float16 causes NaN in ViT-L attention (overflow).
+    bfloat16 has the same dynamic range as float32, making it safe for large ViTs.
+    """
     def __init__(self, device='cpu'):
         super().__init__()
         from transformers import AutoModel
-        self.model = AutoModel.from_pretrained(DINOV3_LARGE_HF_ID).eval().to(device)
+        self.model = AutoModel.from_pretrained(
+            DINOV3_LARGE_HF_ID, torch_dtype=torch.bfloat16
+        ).eval().to(device)
         self.num_register_tokens = self.model.config.num_register_tokens
         self.num_channels = 1024
 
     def get_outputs(self, x):
         from transformers.feature_extraction_utils import BatchFeature
-        inp = BatchFeature(data={"pixel_values": x}, tensor_type='pt').to(x.device, x.dtype)
+        # Always run in bfloat16 regardless of caller dtype
+        inp = BatchFeature(data={"pixel_values": x}, tensor_type='pt').to(x.device, torch.bfloat16)
         return self.model(**inp)
 
 
