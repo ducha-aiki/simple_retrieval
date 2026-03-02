@@ -283,7 +283,6 @@ if __name__ == "__main__":
     parser.add_argument('--global_features', type=str, default='dinosalad')
     parser.add_argument('--local_features', type=str, default='xfeat')
     parser.add_argument('--local_desc_dir', type=str, default='./tmp/local_desc')
-    parser.add_argument('--clidd_dir', type=str, default='./CLIDD')
     parser.add_argument('--quantize_local_desc', action='store_true',
                         help='Store local descriptors as uint8 (normalize→×512→clip[0,255]). '
                              'Dequantization is applied automatically on load.')

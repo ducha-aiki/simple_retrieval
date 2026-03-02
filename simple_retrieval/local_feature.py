@@ -10,6 +10,7 @@ import kornia.feature as KF
 from kornia_moons.feature import laf_from_opencv_SIFT_kpts
 from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset
 from simple_retrieval.xfeat import XFeat, LighterGlue
+from simple_retrieval.clidd import CLIDD
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from kornia_moons.feature import kornia_matches_from_cv2
@@ -163,34 +164,13 @@ def detect_xfeat_dir(img_fnames,
             print ("Done")
     return
 
-def _load_clidd_model(num_feats, clidd_dir):
-    """Instantiate CLIDD E128 from the cloned repo directory.
-
-    CLIDD loads weights from ./weights/E128.pth relative to its repo root,
-    so we temporarily chdir there before constructing the model.
-    """
-    import sys
-    clidd_dir = os.path.abspath(clidd_dir)
-    old_cwd = os.getcwd()
-    if clidd_dir not in sys.path:
-        sys.path.insert(0, clidd_dir)
-    os.chdir(clidd_dir)
-    try:
-        from clidd import CLIDD
-        model = CLIDD(cfg='E128', top_k=num_feats).eval()
-    finally:
-        os.chdir(old_cwd)
-    return model
-
-
-def detect_clidd_single(img, num_feats=2048, resize_to=(800, 600), clidd_dir='./CLIDD'):
-    device = torch.device('cpu')
-    model = _load_clidd_model(num_feats, clidd_dir)
+def detect_clidd_single(img, num_feats=2048, resize_to=(800, 600), weights_path=None, device=torch.device('cuda')):
+    model = CLIDD(cfg='E128', top_k=num_feats, score=-1e9, weights_path=weights_path).eval().to(device)
     hw1 = torch.tensor(img.shape[:2])
     if resize_to:
         img = cv2.resize(img, resize_to)
         hw1_new = torch.tensor(img.shape[:2], device=device)
-    img_t = torch.from_numpy(img).float().permute(2, 0, 1)[None] / 255.0
+    img_t = torch.from_numpy(img).float().permute(2, 0, 1)[None].to(device) / 255.0
     res = model(img_t)
     keypoints = res[0]['keypoints']   # (N, 2)
     descriptors = res[0]['descriptors']  # (N, 128)
@@ -209,9 +189,9 @@ def detect_clidd_dir(img_fnames,
                      num_workers=1,
                      batch_size=1,
                      pin_memory=False,
-                     clidd_dir='./CLIDD',
+                     weights_path=None,
                      quantize=False):
-    model = _load_clidd_model(num_feats, clidd_dir)
+    model = CLIDD(cfg='E128', top_k=num_feats, score=-1e9, weights_path=weights_path).eval()
     if not os.path.isdir(feature_dir):
         os.makedirs(feature_dir)
     ds = CustomImageFolderFromFileList(img_fnames,
