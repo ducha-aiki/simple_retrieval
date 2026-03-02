@@ -287,6 +287,68 @@ class siglip2(nn.Module):
             features = outputs.pooler_output 
         return nn.functional.normalize(features, p=2, dim=-1)
 
+DINOV3_LARGE_HF_ID = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+
+
+class _DINOv3LargeBackbone(nn.Module):
+    """Shared backbone for DINOv3 ViT-L/16. Loaded once, reused by both pooling heads."""
+    def __init__(self, device='cpu'):
+        super().__init__()
+        from transformers import AutoModel
+        self.model = AutoModel.from_pretrained(DINOV3_LARGE_HF_ID).eval().to(device)
+        self.num_register_tokens = self.model.config.num_register_tokens
+        self.num_channels = 1024
+
+    def get_outputs(self, x):
+        from transformers.feature_extraction_utils import BatchFeature
+        inp = BatchFeature(data={"pixel_values": x}, tensor_type='pt').to(x.device, x.dtype)
+        return self.model(**inp)
+
+
+class DINOv3Large(_DINOv3LargeBackbone):
+    """DINOv3 ViT-L/16 — CLS token descriptor (dim=1024).
+
+    Register tokens are not included in the descriptor.
+    """
+    def forward(self, x):
+        outputs = self.get_outputs(x)
+        cls = outputs.pooler_output  # [B, 1024] — CLS only
+        return nn.functional.normalize(cls.float(), p=2, dim=-1)
+
+
+class DINOv3LargeGeM(_DINOv3LargeBackbone):
+    """DINOv3 ViT-L/16 — GeM pooling over patch tokens (dim=1024).
+
+    CLS and register tokens are excluded. GeM exponent p defaults to 3.
+    """
+    def __init__(self, device='cpu', p=3.0):
+        super().__init__(device=device)
+        self.p = p
+
+    def forward(self, x):
+        outputs = self.get_outputs(x)
+        # last_hidden_state: [B, 1 + num_registers + N_patches, D]
+        patch_tokens = outputs.last_hidden_state[:, 1 + self.num_register_tokens:, :].float()
+        gem = patch_tokens.clamp(min=1e-6).pow(self.p).mean(dim=1).pow(1.0 / self.p)  # [B, D]
+        return nn.functional.normalize(gem, p=2, dim=-1)
+
+
+def get_input_transform_dinov3large(image_size=None):
+    # DINOv3 uses the same ImageNet normalisation as DINOv2
+    MEAN = [0.485, 0.456, 0.406]; STD = [0.229, 0.224, 0.225]
+    if image_size:
+        return T.Compose([
+            T.Resize(image_size, interpolation=T.InterpolationMode.BILINEAR),
+            T.ToTensor(),
+            T.Normalize(mean=MEAN, std=STD)
+        ])
+    else:
+        return T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=MEAN, std=STD)
+        ])
+
+
 def get_dinov2salad(device='cpu', dtype=torch.float32):
     """
     This function returns a DINOv2 + SALAD model.
