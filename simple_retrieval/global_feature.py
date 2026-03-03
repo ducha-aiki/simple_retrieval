@@ -409,3 +409,5 @@ def dataset_inference(model, ds, batch_size=4, device=torch.device('cpu'), num_w
     print (f"{len(global_descs)} global descs in {time()-t:.2f} sec")
     print (f"First 5 descriptors (dtype={global_descs.dtype}):\n{global_descs[:5]}")
     return global_descs
+
+from simple_retrieval.mast3r_feature import MASt3RASMKRetrieval  # noqa: F401

@@ -280,8 +280,15 @@ if __name__ == "__main__":
                         help='Query image filename')
     parser.add_argument('--global_desc_dir', type=str, default='./tmp/global_desc')
     parser.add_argument('--use_diffusion',  action='store_true')
-    parser.add_argument('--global_features', type=str, default='dinosalad')
-    parser.add_argument('--local_features', type=str, default='xfeat')
+    parser.add_argument('--global_features', type=str, default='dinosalad',
+                        choices=['dinosalad', 'siglip', 'mast3r_asmk'])
+    parser.add_argument('--mast3r_dir', type=str, default='../mast3r',
+                        help='Path to cloned naver/mast3r repo (used with --global_features=mast3r_asmk)')
+    parser.add_argument('--mast3r_retrieval_model', type=str,
+                        default='../mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth',
+                        help='Path to MASt3R retrieval checkpoint (.pth), codebook .pkl must be in the same dir')
+    parser.add_argument('--local_features', type=str, default='xfeat',
+                        choices=['sift', 'xfeat', 'mast3r', 'clidd'])
     parser.add_argument('--local_desc_dir', type=str, default='./tmp/local_desc')
     parser.add_argument('--quantize_local_desc', action='store_true',
                         help='Store local descriptors as uint8 (normalize→×512→clip[0,255]). '
