@@ -11,6 +11,7 @@ from kornia_moons.feature import laf_from_opencv_SIFT_kpts
 from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset
 from simple_retrieval.xfeat import XFeat, LighterGlue
 from simple_retrieval.clidd import CLIDD
+from simple_retrieval.mast3r_feature import detect_mast3r_dir, detect_mast3r_single  # noqa: F401
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from kornia_moons.feature import kornia_matches_from_cv2

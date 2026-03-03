@@ -18,6 +18,7 @@ import h5py
 from scipy.sparse import csr_matrix
 from simple_retrieval.global_feature import get_dinov2salad, get_input_transform_siglip, get_input_transform_dinosalad, get_input_transform_dinov3large, dataset_inference, siglip2, DINOv3Large, DINOv3LargeGeM
 from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir, detect_clidd_single, detect_clidd_dir, match_query_to_db, spatial_scoring
+from simple_retrieval.mast3r_feature import MASt3RASMKRetrieval, detect_mast3r_single, detect_mast3r_dir
 from simple_retrieval.pile_of_garbage import CustomImageFolder
 from simple_retrieval.manifold_diffusion import sim_kernel, sim_kernel_torch, topK_to_csr, get_W_sparse, normalize_connection_graph, topK_W, cg_diffusion
 import cv2
@@ -68,6 +69,15 @@ class SimpleRetrieval:
         elif config.get("global_features") == "dinov3large_gem":
             self.global_model = DINOv3LargeGeM(device=dev).to(device=dev, dtype=dtype).eval()
             self.global_transform = get_input_transform_dinov3large((img_size, img_size))
+        elif config.get("global_features") == "mast3r_asmk":
+            self.mast3r_retrieval = MASt3RASMKRetrieval(
+                mast3r_dir=config.get("mast3r_dir", "../mast3r"),
+                retrieval_model_path=config.get("mast3r_retrieval_model",
+                    "../mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth"),
+                device=config.get("device", "cuda"),
+            )
+            self.global_model = None
+            self.global_transform = None
         else:
             self.global_model  = siglip2(device=dev).eval()
             self.global_transform = get_input_transform_siglip((384, 384))
@@ -78,6 +88,8 @@ class SimpleRetrieval:
         index_dir={self.index_dir}, config={self.config})"""
     
     def get_cache_dir_name(self, img_dir):
+        if self.index_dir is not None:
+            return self.index_dir
         return f"./tmp/{img_dir.replace('/', '_')}"
     
     def get_global_index_fname(self, img_dir):
@@ -109,6 +121,23 @@ class SimpleRetrieval:
         index_dir = self.get_cache_dir_name(img_dir)
         os.makedirs(index_dir, exist_ok=True)
         self.ds = CustomImageFolder(img_dir, transform=self.global_transform)
+
+        if self.config.get("global_features") == "mast3r_asmk":
+            h5_path = os.path.join(index_dir, "mast3r_asmk.h5")
+            if os.path.exists(h5_path) and not self.config["force_recache"]:
+                print(f"Loading MASt3R ASMK features from {h5_path}")
+                self.mast3r_retrieval.rebuild_ivf(h5_path)
+            else:
+                print(f"Extracting MASt3R ASMK features for {len(self.ds.samples)} images")
+                lf_dir = None
+                if self.config.get("local_features") == "mast3r":
+                    lf_dir = self.get_local_feature_dir(img_dir)
+                self.mast3r_retrieval.index_images(
+                    self.ds.samples, h5_path=h5_path, local_feature_dir=lf_dir)
+                print(f"Features saved to {h5_path}")
+            self.Wn = None
+            return
+
         global_index_fname = self.get_global_index_fname(img_dir)
         Wn_fname = self.get_global_index_Wn_name(img_dir)
         
@@ -177,6 +206,16 @@ class SimpleRetrieval:
                                  num_workers=self.config["num_workers"],
                                  pin_memory=False,
                                  quantize=self.config["quantize_local_desc"])
+            elif self.config["local_features"] == "mast3r":
+                assert hasattr(self, 'mast3r_retrieval'), \
+                    "local_features='mast3r' requires global_features='mast3r_asmk'"
+                detect_mast3r_dir(fnames_list,
+                                  model=self.mast3r_retrieval.retriever.model,
+                                  imsize=self.mast3r_retrieval.retriever.imsize,
+                                  feature_dir=self.local_feature_dir,
+                                  batch_size=self.config["local_desc_batch_size"],
+                                  num_workers=self.config["num_workers"],
+                                  device=torch.device(self.config["device"]))
             print (f"{self.config['local_features']} index of created from images in: {img_dir} in {time()-t:.2f} sec, saved to {self.local_feature_dir}")
         else:
             print (f"Local index already exists in {self.local_feature_dir}")
@@ -205,8 +244,17 @@ class SimpleRetrieval:
         if isinstance(img, str):
             img = Image.open(img).convert("RGB")
         if isinstance(img, np.ndarray):
+            img_np = img
             img = Image.fromarray(img)
+        else:
+            img_np = np.array(img)
         t=time()
+        if self.config.get("global_features") == "mast3r_asmk":
+            ranks, scores = self.mast3r_retrieval.query(img_np)
+            idxs = np.array(ranks[:num_nn], dtype=np.int64)
+            out_vals = np.array(scores[:num_nn], dtype=np.float32)
+            print(f"MASt3R ASMK shortlist in: {time()-t:.2f} sec")
+            return idxs, out_vals
         query = self.describe_query(img)
         if manifold_diffusion:
             print("Diffusion")
@@ -293,6 +341,14 @@ class SimpleRetrieval:
                                                     num_feats=self.config["num_local_features"],
                                                     resize_to=self.config["local_desc_image_size"],
                                                     device=torch.device(device))
+        elif self.config["local_features"] == "mast3r":
+            assert hasattr(self, 'mast3r_retrieval'), \
+                "local_features='mast3r' requires global_features='mast3r_asmk'"
+            kpt, descs, lafs1 = detect_mast3r_single(
+                query,
+                model=self.mast3r_retrieval.retriever.model,
+                imsize=self.mast3r_retrieval.retriever.imsize,
+                device=torch.device(device))
         descs = descs.to(device, dtype)
         lafs1 = lafs1.to(device, dtype)
         fnames = [self.ds.samples[i] for i in shortlist]
