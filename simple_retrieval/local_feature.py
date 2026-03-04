@@ -7,6 +7,7 @@ import os
 from tqdm import tqdm
 import numpy as np
 import kornia.feature as KF
+from multiprocessing import Pool, cpu_count
 from kornia_moons.feature import laf_from_opencv_SIFT_kpts
 from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset, H5MASt3RLocalFeatureDataset
 from simple_retrieval.xfeat import XFeat, LighterGlue
@@ -15,6 +16,74 @@ from simple_retrieval.mast3r_feature import detect_mast3r_dir, detect_mast3r_sin
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from kornia_moons.feature import kornia_matches_from_cv2
+
+def _rootsift_numpy(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Pure-numpy RootSIFT: L1-normalise → sqrt → L2-normalise."""
+    x = x.astype(np.float32)
+    x /= (np.linalg.norm(x, ord=1, axis=-1, keepdims=True) + eps)
+    np.clip(x, eps, None, out=x)
+    np.sqrt(x, out=x)
+    x /= (np.linalg.norm(x, ord=2, axis=-1, keepdims=True) + eps)
+    return x
+
+
+def _laf_from_opencv_kpts_numpy(kpts, mr_size: float = 6.0) -> np.ndarray:
+    """
+    Build a (1, N, 2, 3) LAF array from a list of cv2.KeyPoint objects.
+    Pure numpy — safe to call inside forked worker processes.
+    """
+    n = len(kpts)
+    xy     = np.array([[kp.pt[0], kp.pt[1]] for kp in kpts], dtype=np.float32)
+    sizes  = np.array([kp.size for kp in kpts], dtype=np.float32)
+    angles = np.array([-kp.angle * np.pi / 180.0 for kp in kpts], dtype=np.float32)
+    scale  = sizes / (2.0 * mr_size)
+    cos_a  = np.cos(angles) * scale
+    sin_a  = np.sin(angles) * scale
+    lafs = np.zeros((1, n, 2, 3), dtype=np.float32)
+    lafs[0, :, 0, 0] =  cos_a
+    lafs[0, :, 0, 1] = -sin_a
+    lafs[0, :, 0, 2] =  xy[:, 0]
+    lafs[0, :, 1, 0] =  sin_a
+    lafs[0, :, 1, 1] =  cos_a
+    lafs[0, :, 1, 2] =  xy[:, 1]
+    return lafs
+
+
+def _sift_worker(args):
+    """
+    Module-level worker for parallel SIFT extraction.
+    Pure numpy/OpenCV — no torch/kornia — safe under multiprocessing fork.
+    """
+    img_path, num_feats, resize_to = args
+    try:
+        sift = cv2.SIFT_create(num_feats, edgeThreshold=-1000, contrastThreshold=-1000)
+        img1 = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
+        if img1 is None:
+            return img_path, None
+        hw1 = np.array(img1.shape[:2])
+        if resize_to:
+            img1 = cv2.resize(img1, resize_to)
+            hw1_new = np.array(img1.shape[:2])
+            scale_w = float(hw1[1]) / float(hw1_new[1])
+            scale_h = float(hw1[0]) / float(hw1_new[0])
+        else:
+            scale_w = scale_h = 1.0
+        kpts1, descs1 = sift.detectAndCompute(img1, None)
+        if kpts1 is None or len(kpts1) == 0:
+            return img_path, None
+        lafs_np = _laf_from_opencv_kpts_numpy(kpts1)
+        if resize_to:
+            lafs_np[0, :, 0, :] *= scale_w
+            lafs_np[0, :, 1, :] *= scale_h
+        avg_sf   = (scale_w + scale_h) / 2.0
+        scales1  = np.array([kp.size / 2.0 * avg_sf for kp in kpts1], dtype=np.float32)
+        descs_np = _rootsift_numpy(descs1)
+        kpts_np  = lafs_np[0, :, :, 2]          # centre = last column of each 2×3 block
+        return img_path, (kpts_np, lafs_np, descs_np, hw1, scales1)
+    except Exception as e:
+        print(f"[SIFT worker] Error on {img_path}: {e}")
+        return img_path, None
+
 
 def load_torch_image(fname, device=torch.device('cpu')):
     img = K.image_to_tensor(cv2.imread(fname), False).float() / 255.
@@ -47,41 +116,37 @@ def get_input_xfeat_transform(image_size=None):
 def detect_sift_dir(img_fnames,
                 num_feats=2048,
                 device=torch.device('cpu'),
-                feature_dir='.featureout', resize_to=(800, 600)):
-    sift = cv2.SIFT_create(num_feats, edgeThreshold=-1000, contrastThreshold=-1000)
-    if not os.path.isdir(feature_dir):
-        os.makedirs(feature_dir)
-    with h5py.File(f'{feature_dir}/lafs.h5', mode='w') as f_laf, \
-            h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
-            h5py.File(f'{feature_dir}/hw.h5', mode='w') as f_hw, \
-            h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
-            h5py.File(f'{feature_dir}/scales.h5', mode='w') as f_scales:
-        for i, img_path in tqdm(enumerate(img_fnames)):
-            img1 = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
-            hw1 = torch.tensor(img1.shape[:2])
-            if resize_to:
-                img1 = cv2.resize(img1, resize_to)
-                hw1_new = torch.tensor(img1.shape[:2])
+                feature_dir='.featureout', resize_to=(800, 600),
+                num_workers=None):
+    """Extract SIFT features for a list of images in parallel.
+
+    Uses ``num_workers`` processes for extraction (default: cpu_count()-1) and
+    writes to HDF5 files in the main process (single writer).
+    """
+    if num_workers is None:
+        num_workers = max(1, cpu_count() - 1)
+    os.makedirs(feature_dir, exist_ok=True)
+
+    worker_args = [(p, num_feats, resize_to) for p in img_fnames]
+
+    with Pool(num_workers) as pool, \
+         h5py.File(f'{feature_dir}/lafs.h5', mode='w') as f_laf, \
+         h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
+         h5py.File(f'{feature_dir}/hw.h5', mode='w') as f_hw, \
+         h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
+         h5py.File(f'{feature_dir}/scales.h5', mode='w') as f_scales:
+        for img_path, result in tqdm(
+                pool.imap_unordered(_sift_worker, worker_args),
+                total=len(worker_args), desc="SIFT extraction"):
+            if result is None:
+                print(f"[detect_sift_dir] Skipping {img_path} (no keypoints or read error)")
+                continue
+            kpts_np, lafs_np, descs_np, hw1, scales1 = result
             key = img_path
-            kpts1, descs1 = sift.detectAndCompute(img1, None)
-            lafs1 = laf_from_opencv_SIFT_kpts(kpts1)
-            # SIFT keypoint radius in original image space (kp.size is diameter in resized space)
-            scale_factor_w = (hw1[1] / hw1_new[1]).item() if resize_to else 1.0
-            scale_factor_h = (hw1[0] / hw1_new[0]).item() if resize_to else 1.0
-            avg_scale_factor = (scale_factor_w + scale_factor_h) / 2.0
-            scales1 = np.array([kp.size / 2.0 * avg_scale_factor for kp in kpts1],
-                                dtype=np.float32)
-            if resize_to:
-                lafs1[:, :, 0, :] *= hw1[1] / hw1_new[1]
-                lafs1[:, :, 1, :] *= hw1[0] / hw1_new[0]
-            descs1 = sift_to_rootsift(torch.from_numpy(descs1))
-            desc_dim = descs1.shape[-1]
-            kpts = KF.get_laf_center(lafs1).reshape(-1, 2).detach().cpu().numpy()
-            descs1 = descs1.reshape(-1, desc_dim).detach().cpu().numpy()
-            f_laf[key] = lafs1.detach().cpu().numpy()
-            f_kp[key] = kpts
-            f_desc[key] = descs1
-            f_hw[key] = hw1.detach().cpu().numpy()
+            f_laf[key]    = lafs_np
+            f_kp[key]     = kpts_np
+            f_desc[key]   = descs_np
+            f_hw[key]     = hw1
             f_scales[key] = scales1
     return
 
