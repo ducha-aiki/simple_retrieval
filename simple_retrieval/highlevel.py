@@ -19,6 +19,7 @@ from scipy.sparse import csr_matrix
 from simple_retrieval.global_feature import get_dinov2salad, get_input_transform_siglip, get_input_transform_dinosalad, get_input_transform_dinov3large, dataset_inference, siglip2, DINOv3Large, DINOv3LargeGeM
 from simple_retrieval.local_feature import detect_sift_single, detect_sift_dir, detect_xfeat_single, detect_xfeat_dir, detect_clidd_single, detect_clidd_dir, match_query_to_db, spatial_scoring
 from simple_retrieval.mast3r_feature import MASt3RASMKRetrieval, detect_mast3r_single, detect_mast3r_dir
+from simple_retrieval.sift_asmk import SIFTASMKRetrieval
 from simple_retrieval.pile_of_garbage import CustomImageFolder
 from simple_retrieval.manifold_diffusion import sim_kernel, sim_kernel_torch, topK_to_csr, get_W_sparse, normalize_connection_graph, topK_W, cg_diffusion
 import cv2
@@ -48,6 +49,19 @@ def get_default_config():
             # VLM resorting options (used when resort_criterion starts with 'vlm_')
             "vlm_model": "qwen2vl-2b",   # model shortcut or full HF path
             "vlm_bbox": None,             # [x1,y1,x2,y2] query ROI, or None
+            # SIFT+ASMK options (used when global_features='sift_asmk')
+            "sift_asmk_vocab_size": 65536,
+            "sift_asmk_sample_n": 500_000,
+            "sift_asmk_topk": 1000,
+            "sift_asmk_binary": True,
+            "sift_asmk_gpu_id": None,
+            "sift_asmk_scale_sigma": 1.0,
+            "sift_asmk_multiple_assignment": 1,
+            # HQE options
+            "hqe_topk_verify": 50,
+            "hqe_max_iters": 2,
+            "hqe_overlap_thresh": 0.5,
+            "hqe_consistency_thresh": 0.1,
             }
     return conf
     
@@ -75,6 +89,17 @@ class SimpleRetrieval:
                 retrieval_model_path=config.get("mast3r_retrieval_model",
                     "../mast3r/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth"),
                 device=config.get("device", "cuda"),
+            )
+            self.global_model = None
+            self.global_transform = None
+        elif config.get("global_features") == "sift_asmk":
+            self.sift_asmk = SIFTASMKRetrieval(
+                vocab_size=config.get("sift_asmk_vocab_size", 65536),
+                topk=config.get("sift_asmk_topk", 1000),
+                binary=config.get("sift_asmk_binary", True),
+                gpu_id=config.get("sift_asmk_gpu_id", None),
+                scale_sigma=config.get("sift_asmk_scale_sigma", 1.0),
+                multiple_assignment=config.get("sift_asmk_multiple_assignment", 1),
             )
             self.global_model = None
             self.global_transform = None
@@ -139,6 +164,44 @@ class SimpleRetrieval:
             self.Wn = None
             return
 
+        if self.config.get("global_features") == "sift_asmk":
+            # SIFT+ASMK: local features serve as both global retrieval and local reranking.
+            # Step 1: ensure SIFT features are extracted.
+            local_feat_dir = self.get_local_feature_dir(img_dir)
+            os.makedirs(local_feat_dir, exist_ok=True)
+            sentinel = os.path.join(local_feat_dir, 'descriptors.h5')
+            if not os.path.exists(sentinel) or self.config["force_recache"]:
+                print(f"Extracting SIFT features for {len(self.ds.samples)} images...")
+                detect_sift_dir(self.ds.samples,
+                                feature_dir=local_feat_dir,
+                                num_feats=self.config["num_local_features"],
+                                resize_to=self.config["local_desc_image_size"])
+            else:
+                print(f"SIFT features already exist in {local_feat_dir}")
+            self.local_feature_dir = local_feat_dir
+
+            # Step 2: train vocabulary + build IVF (both cache-backed).
+            vocab_cache = os.path.join(index_dir, "sift_asmk_vocab.pkl")
+            ivf_cache   = os.path.join(index_dir, "sift_asmk_ivf.pkl")
+            aux_path    = os.path.join(index_dir, "sift_asmk_aux.pkl")
+
+            if os.path.exists(vocab_cache) and os.path.exists(ivf_cache) \
+                    and os.path.exists(aux_path) and not self.config["force_recache"]:
+                print("Loading SIFT+ASMK index from cache...")
+                self.sift_asmk.load_aux(aux_path)
+                self.sift_asmk.rebuild_ivf(vocab_cache, ivf_cache)
+            else:
+                self.sift_asmk.train_vocabulary(
+                    local_feat_dir, self.ds.samples,
+                    sample_n=self.config.get("sift_asmk_sample_n", 500_000),
+                    cache_path=vocab_cache)
+                self.sift_asmk.build_ivf(
+                    local_feat_dir, self.ds.samples,
+                    cache_path=ivf_cache)
+                self.sift_asmk.save_aux(aux_path)
+            self.Wn = None
+            return
+
         global_index_fname = self.get_global_index_fname(img_dir)
         Wn_fname = self.get_global_index_Wn_name(img_dir)
         
@@ -182,6 +245,10 @@ class SimpleRetrieval:
         # Placeholder function for creating a local descriptor index
         self.local_feature_dir = self.get_local_feature_dir(img_dir)
         t=time()
+        # sift_asmk already extracts SIFT in create_global_descriptor_index
+        if self.config.get("global_features") == "sift_asmk":
+            print(f"SIFT features managed by sift_asmk pipeline, already in {self.local_feature_dir}")
+            return
         sentinel = 'keypoints.h5' if self.config["local_features"] == "mast3r" else 'descriptors.h5'
         if (not os.path.exists(os.path.join(self.local_feature_dir, sentinel))) or (self.config["force_recache"]):
             fnames_list = self.ds.samples
@@ -257,6 +324,18 @@ class SimpleRetrieval:
             out_vals = np.array(scores[:num_nn], dtype=np.float32)
             print(f"MASt3R ASMK shortlist in: {time()-t:.2f} sec")
             return idxs, out_vals
+
+        if self.config.get("global_features") == "sift_asmk":
+            _, q_descs, q_lafs = detect_sift_single(
+                img_np,
+                num_feats=self.config["num_local_features"],
+                resize_to=self.config["local_desc_image_size"])
+            q_descs_np = q_descs.float().cpu().numpy()
+            ranks, scores = self.sift_asmk.query(q_descs_np, topk=num_nn)
+            scores = self.sift_asmk.scale_biased_rescore(q_lafs, ranks, scores)
+            print(f"SIFT+ASMK shortlist in: {time()-t:.2f} sec")
+            return ranks[:num_nn], scores[:num_nn]
+
         query = self.describe_query(img)
         if manifold_diffusion:
             print("Diffusion")
@@ -394,6 +473,63 @@ class SimpleRetrieval:
         return (shortlist[sorted_idxs],
                 np.array(new_shortlist_scores)[sorted_idxs],
                 corners_norm[sorted_idxs])
+
+    def hqe_query(self, img, topk_asmk: int = None, topk_verify: int = None,
+                  max_hqe_iters: int = None, device: str = None,
+                  matching_method: str = None) -> tuple:
+        """
+        Full HQE pipeline (Phases 1–4) for SIFT+ASMK global_features.
+
+        Runs ASMK retrieval, scale-biased re-scoring, RANSAC verification,
+        result grouping, geometric consistency check, and iterative query
+        expansion.
+
+        Args:
+            img: Query image — path (str), PIL Image, or np.ndarray (H,W,3 RGB).
+            topk_asmk:        Number of ASMK candidates per iteration (default from config).
+            topk_verify:      Number of candidates for RANSAC verification (default from config).
+            max_hqe_iters:    Maximum HQE expansion iterations (default from config).
+            device:           'cuda' or 'cpu' (default from config).
+            matching_method:  Local matching method (default from config).
+        Returns:
+            sorted_idxs  (np.ndarray): DB image indices, best-first.
+            final_scores (np.ndarray): Corresponding scores.
+        """
+        assert self.config.get("global_features") == "sift_asmk", \
+            "hqe_query() requires global_features='sift_asmk'"
+
+        if isinstance(img, str):
+            img = np.array(__import__('PIL').Image.open(img).convert("RGB"))
+        elif not isinstance(img, np.ndarray):
+            img = np.array(img)
+
+        dev = torch.device(device or self.config["device"])
+        mm  = matching_method or self.config.get("matching_method", "smnn")
+
+        _, q_descs, q_lafs = detect_sift_single(
+            img,
+            num_feats=self.config["num_local_features"],
+            resize_to=self.config["local_desc_image_size"])
+
+        q_hw = np.array(img.shape[:2])
+
+        idxs, scores = self.sift_asmk.hqe_query(
+            q_descs=q_descs.float().cpu().numpy(),
+            q_lafs=q_lafs.cpu().numpy(),
+            q_hw=q_hw,
+            feature_dir=self.local_feature_dir,
+            topk_asmk=topk_asmk or self.config.get("sift_asmk_topk", 1000),
+            topk_verify=topk_verify or self.config.get("hqe_topk_verify", 50),
+            max_hqe_iters=max_hqe_iters if max_hqe_iters is not None
+                          else self.config.get("hqe_max_iters", 2),
+            overlap_thresh=self.config.get("hqe_overlap_thresh", 0.5),
+            consistency_thresh=self.config.get("hqe_consistency_thresh", 0.1),
+            device=dev,
+            matching_method=mm,
+            inl_th=self.config.get("inl_th", 3.0),
+            num_ransac_iter=self.config.get("num_iter", 1000),
+        )
+        return idxs, scores
 
     def _resort_shortlist_vlm(self, query, shortlist, criterion='vlm_zoom_in',
                                device='cuda', bbox=None, vlm_model=None,

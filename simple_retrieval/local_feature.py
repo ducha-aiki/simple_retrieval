@@ -54,17 +54,23 @@ def detect_sift_dir(img_fnames,
     with h5py.File(f'{feature_dir}/lafs.h5', mode='w') as f_laf, \
             h5py.File(f'{feature_dir}/keypoints.h5', mode='w') as f_kp, \
             h5py.File(f'{feature_dir}/hw.h5', mode='w') as f_hw, \
-            h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc:
+            h5py.File(f'{feature_dir}/descriptors.h5', mode='w') as f_desc, \
+            h5py.File(f'{feature_dir}/scales.h5', mode='w') as f_scales:
         for i, img_path in tqdm(enumerate(img_fnames)):
             img1 = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
             hw1 = torch.tensor(img1.shape[:2])
             if resize_to:
                 img1 = cv2.resize(img1, resize_to)
                 hw1_new = torch.tensor(img1.shape[:2])
-            #img_fname = img_path.split('/')[-1]
             key = img_path
             kpts1, descs1 = sift.detectAndCompute(img1, None)
             lafs1 = laf_from_opencv_SIFT_kpts(kpts1)
+            # SIFT keypoint radius in original image space (kp.size is diameter in resized space)
+            scale_factor_w = (hw1[1] / hw1_new[1]).item() if resize_to else 1.0
+            scale_factor_h = (hw1[0] / hw1_new[0]).item() if resize_to else 1.0
+            avg_scale_factor = (scale_factor_w + scale_factor_h) / 2.0
+            scales1 = np.array([kp.size / 2.0 * avg_scale_factor for kp in kpts1],
+                                dtype=np.float32)
             if resize_to:
                 lafs1[:, :, 0, :] *= hw1[1] / hw1_new[1]
                 lafs1[:, :, 1, :] *= hw1[0] / hw1_new[0]
@@ -76,6 +82,7 @@ def detect_sift_dir(img_fnames,
             f_kp[key] = kpts
             f_desc[key] = descs1
             f_hw[key] = hw1.detach().cpu().numpy()
+            f_scales[key] = scales1
     return
 
 def detect_sift_single(img, num_feats=2048, resize_to=(800, 600)):
@@ -350,6 +357,54 @@ def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_
                 matching_keypoints.append((mkpts1, mkpts2))
                 out_hw2.append(hw2)
     return matching_keypoints, out_hw2
+
+
+def match_feature_pair(fname1: str, fname2: str, feature_dir: str,
+                       matching_method: str = 'smnn',
+                       device: torch.device = torch.device('cpu')):
+    """
+    Match local features between two DB images stored in feature_dir h5 files.
+
+    Returns:
+        mkpts1 (Tensor, N×2), mkpts2 (Tensor, N×2), hw1 (Tensor), hw2 (Tensor)
+    """
+    dtype = torch.float16 if 'cuda' in str(device) else torch.float32
+    with h5py.File(os.path.join(feature_dir, 'descriptors.h5'), 'r') as f_desc, \
+         h5py.File(os.path.join(feature_dir, 'lafs.h5'), 'r') as f_laf, \
+         h5py.File(os.path.join(feature_dir, 'hw.h5'), 'r') as f_hw:
+        descs1 = torch.from_numpy(f_desc[fname1][...].astype(np.float32)).to(device, dtype)
+        descs2 = torch.from_numpy(f_desc[fname2][...].astype(np.float32)).to(device, dtype)
+        lafs1 = torch.from_numpy(f_laf[fname1][...]).to(device, dtype)
+        lafs2 = torch.from_numpy(f_laf[fname2][...]).to(device, dtype)
+        hw1 = torch.from_numpy(f_hw[fname1][...])
+        hw2 = torch.from_numpy(f_hw[fname2][...])
+
+    kp1 = KF.get_laf_center(lafs1).reshape(-1, 2)
+    kp2 = KF.get_laf_center(lafs2).reshape(-1, 2)
+
+    if matching_method == 'smnn':
+        dists, idxs = K.feature.match_smnn(descs1, descs2, 0.99)
+    elif matching_method == 'snn':
+        dists, idxs = K.feature.match_snn(descs1, descs2, 0.95)
+    elif matching_method in ('faiss_gpu', 'faiss_cpu'):
+        import faiss
+        if matching_method == 'faiss_gpu':
+            res = faiss.StandardGpuResources()
+            index = faiss.index_cpu_to_gpu(res, 0, faiss.IndexFlatL2(descs1.shape[-1]))
+        else:
+            index = faiss.IndexFlatL2(descs1.shape[-1])
+        index.add(descs1.float().cpu().numpy())
+        D, I = index.search(descs2.float().cpu().numpy(), 2)
+        snn_ratio = D[:, 0] / (1e-8 + D[:, 1])
+        valid = snn_ratio <= 0.95
+        idxs = torch.from_numpy(
+            np.stack([I[:, 0], np.arange(len(I))], axis=1)[valid])
+    else:
+        raise NotImplementedError(f"matching_method={matching_method!r}")
+
+    mkpts1 = kp1[idxs[:, 0]].cpu()
+    mkpts2 = kp2[idxs[:, 1]].cpu()
+    return mkpts1, mkpts2, hw1, hw2
 
 
 def get_scale_factor(H):
