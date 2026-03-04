@@ -124,6 +124,7 @@ class SimpleRetrieval:
 
         if self.config.get("global_features") == "mast3r_asmk":
             h5_path = os.path.join(index_dir, "mast3r_asmk.h5")
+            self.mast3r_asmk_h5_path = h5_path
             if os.path.exists(h5_path) and not self.config["force_recache"]:
                 print(f"Loading MASt3R ASMK features from {h5_path}")
                 self.mast3r_retrieval.rebuild_ivf(h5_path)
@@ -133,7 +134,7 @@ class SimpleRetrieval:
                 if self.config.get("local_features") == "mast3r":
                     lf_dir = self.get_local_feature_dir(img_dir)
                 self.mast3r_retrieval.index_images(
-                    self.ds.samples, h5_path=h5_path, local_feature_dir=lf_dir)
+                    self.ds.samples, h5_path=h5_path, local_feature_dir=lf_dir, batch_size=self.config["local_desc_batch_size"], num_workers=self.config["num_workers"])
                 print(f"Features saved to {h5_path}")
             self.Wn = None
             return
@@ -181,7 +182,8 @@ class SimpleRetrieval:
         # Placeholder function for creating a local descriptor index
         self.local_feature_dir = self.get_local_feature_dir(img_dir)
         t=time()
-        if (not os.path.exists(os.path.join(self.local_feature_dir, 'descriptors.h5'))) or (self.config["force_recache"]):
+        sentinel = 'keypoints.h5' if self.config["local_features"] == "mast3r" else 'descriptors.h5'
+        if (not os.path.exists(os.path.join(self.local_feature_dir, sentinel))) or (self.config["force_recache"]):
             fnames_list = self.ds.samples
             if self.config["local_features"] == "sift":
                 detect_sift_dir(fnames_list, feature_dir=self.local_feature_dir, num_feats=self.config["num_local_features"], device=self.config["device"],
@@ -353,13 +355,20 @@ class SimpleRetrieval:
         lafs1 = lafs1.to(device, dtype)
         fnames = [self.ds.samples[i] for i in shortlist]
         tt = time()
+        extra_kwargs = {}
+        if self.config['local_features'] == 'mast3r':
+            if not hasattr(self, '_fname_to_idx'):
+                self._fname_to_idx = {p: i for i, p in enumerate(self.ds.samples)}
+            extra_kwargs = {'mast3r_asmk_h5': self.mast3r_asmk_h5_path,
+                            'fname_to_idx':   self._fname_to_idx}
         with torch.inference_mode():
             matching_keypoints, hw2_s = match_query_to_db(descs, lafs1, hw1,
                                                self.local_feature_dir,
                                                fnames,
                                                feature_name=self.config['local_features'],
                                                matching_method=matching_method,
-                                               device=torch.device(device))
+                                               device=torch.device(device),
+                                               **extra_kwargs)
         print(f"Matching {matching_method} in {time()-tt:.4f} sec")
         tt = time()
         new_shortlist_scores, Hs = spatial_scoring(

@@ -123,7 +123,7 @@ class MASt3RASMKRetrieval:
         self.device = device
         self.asmk_dataset = None
 
-    def _extract_chunk_batched(self, images, batch_size=8, num_workers=4):
+    def _extract_chunk_batched(self, images, batch_size=16, num_workers=2):
         """Extract MASt3R local features, batching same-shape images on the GPU.
 
         Returns (feat_list, kpts_list, orig_hws) — all in original image order.
@@ -150,8 +150,8 @@ class MASt3RASMKRetrieval:
             collate_fn=lambda items: items,
         )
 
-        feat_list   = [None] * len(images)
-        kpts_list   = [None] * len(images)
+        feat_list = [None] * len(images)   # top-K feat (already gathered by forward_local)
+        kpts_list = [None] * len(images)
         flush_sizes = []
         sorted_offset = 0
 
@@ -172,8 +172,9 @@ class MASt3RASMKRetrieval:
                 with torch.no_grad():
                     feat, _, topk_idx = self.retriever.model.forward_local(
                         {'img': imgs_t, 'true_shape': sh_t})
-                feat_cpu  = feat.cpu()
-                kpts_proc = _mast3r_patch_centers(topk_idx.cpu(), sh_t.cpu())
+                feat_cpu      = feat.cpu()
+                topk_idx_cpu  = topk_idx.cpu()
+                kpts_proc     = _mast3r_patch_centers(topk_idx_cpu, sh_t.cpu())
                 H_proc, W_proc = shape
                 for j, (_, sorted_i, _) in enumerate(grp):
                     orig_i         = order[sorted_i]
@@ -193,6 +194,7 @@ class MASt3RASMKRetrieval:
         return feat_list, kpts_list, orig_hws
 
     def index_images(self, fnames, h5_path, chunk_size=2000, batch_size=8,
+                     num_workers=4,
                      local_feature_dir=None):
         """Extract features in chunks, stream to HDF5, build ASMK IVF.
 
@@ -221,6 +223,7 @@ class MASt3RASMKRetrieval:
 
         def writer_worker():
             lf = {}
+            all_nkpts = []   # n_kpts per image — used to build offsets at the end
             with h5py.File(h5_path, 'w') as hf:
                 ds_feat = hf.create_dataset('feat', shape=(0, dim),
                                             maxshape=(None, dim),
@@ -230,10 +233,10 @@ class MASt3RASMKRetrieval:
                                             dtype='int64', chunks=(1024,))
                 if local_feature_dir:
                     os.makedirs(local_feature_dir, exist_ok=True)
-                    lf['desc'] = h5py.File(f'{local_feature_dir}/descriptors.h5', 'w')
-                    lf['kp']   = h5py.File(f'{local_feature_dir}/keypoints.h5',   'w')
-                    lf['laf']  = h5py.File(f'{local_feature_dir}/lafs.h5',        'w')
-                    lf['hw']   = h5py.File(f'{local_feature_dir}/hw.h5',           'w')
+                    # No descriptors.h5 — descriptors are read from this ASMK h5 via offsets
+                    lf['kp']  = h5py.File(f'{local_feature_dir}/keypoints.h5', 'w')
+                    lf['laf'] = h5py.File(f'{local_feature_dir}/lafs.h5',      'w')
+                    lf['hw']  = h5py.File(f'{local_feature_dir}/hw.h5',        'w')
                 try:
                     write_pos = 0
                     while True:
@@ -252,15 +255,19 @@ class MASt3RASMKRetrieval:
                         ds_ids.resize(write_pos + n, axis=0)
                         ds_ids[write_pos:write_pos + n]  = ids_np
                         write_pos += n
+                        for f in feat_list:
+                            all_nkpts.append(f.shape[0])
                         if lf:
                             for i, path in enumerate(chunk_paths):
                                 lafs = KF.laf_from_center_scale_ori(
                                     torch.from_numpy(kpts_list[i]).unsqueeze(0)).numpy()
-                                lf['desc'][path] = feat_list[i]
-                                lf['kp'][path]   = kpts_list[i]
-                                lf['laf'][path]  = lafs
-                                lf['hw'][path]   = np.array(list(orig_hws[i]))
+                                lf['kp'][path]  = kpts_list[i]
+                                lf['laf'][path] = lafs
+                                lf['hw'][path]  = np.array(list(orig_hws[i]))
                         write_q.task_done()
+                    # offsets[i] = start row in feat for image i
+                    offsets = np.concatenate([[0], np.cumsum(all_nkpts)]).astype(np.int64)
+                    hf.create_dataset('offsets', data=offsets)
                 finally:
                     for f in lf.values():
                         f.close()
@@ -271,7 +278,7 @@ class MASt3RASMKRetrieval:
         for start in range(0, N, chunk_size):
             chunk = images[start:start + chunk_size]
             feat_list, kpts_list, orig_hws = self._extract_chunk_batched(
-                chunk, batch_size=batch_size)
+                chunk, batch_size=batch_size, num_workers=num_workers)
             write_q.put((start, feat_list, kpts_list, orig_hws, chunk))
             print(f"[MASt3R-ASMK] {min(start + chunk_size, N)}/{N} images extracted",
                   flush=True)
@@ -328,7 +335,7 @@ class MASt3RASMKRetrieval:
 # ---------------------------------------------------------------------------
 
 def detect_mast3r_dir(img_fnames, model, imsize, feature_dir,
-                      batch_size=8, num_workers=4,
+                      batch_size=16, num_workers=2,
                       device=torch.device('cuda')):
     """Extract MASt3R local features for all DB images, save to H5 files.
 
@@ -384,8 +391,9 @@ def detect_mast3r_dir(img_fnames, model, imsize, feature_dir,
                 with torch.inference_mode():
                     feat, _, topk_idx = model.forward_local(
                         {'img': imgs_t, 'true_shape': sh_t})
-                feat_cpu  = feat.cpu()
-                kpts_proc = _mast3r_patch_centers(topk_idx.cpu(), sh_t.cpu())
+                feat_cpu      = feat.cpu()
+                topk_idx_cpu  = topk_idx.cpu()
+                kpts_proc     = _mast3r_patch_centers(topk_idx_cpu, sh_t.cpu())
                 H_proc, W_proc = shape
                 for j, (_, sorted_i, _) in enumerate(grp):
                     path           = sorted_fnames[sorted_i]
@@ -396,7 +404,7 @@ def detect_mast3r_dir(img_fnames, model, imsize, feature_dir,
                     kpts_np        = kpts.numpy()
                     lafs = KF.laf_from_center_scale_ori(
                         torch.from_numpy(kpts_np).unsqueeze(0)).numpy()
-                    f_desc[path] = feat_cpu[j].numpy()
+                    f_desc[path] = feat_cpu[j][topk_idx_cpu[j]].numpy()  # top-K only
                     f_kp[path]   = kpts_np
                     f_laf[path]  = lafs
                     f_hw[path]   = np.array([H_orig, W_orig])

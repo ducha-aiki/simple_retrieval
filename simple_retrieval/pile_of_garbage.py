@@ -142,3 +142,42 @@ class H5LocalFeatureDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return self.dataset_len
+
+
+class H5MASt3RLocalFeatureDataset(torch.utils.data.Dataset):
+    """Read MASt3R local descriptors from the ASMK h5 file (no separate descriptors.h5).
+
+    Descriptors for image i are feat[offsets[i]:offsets[i+1]][topk_idx[topk_offsets[i]:topk_offsets[i+1]]].
+    Keypoints and LAFs are read from the local_feature_dir h5 files as usual.
+    """
+    def __init__(self, local_feature_dir, asmk_h5_path, fnames_list, fname_to_idx):
+        self.local_feature_dir = local_feature_dir
+        self.asmk_h5_path = asmk_h5_path
+        self.fname_list = fnames_list
+        self.fname_to_idx = fname_to_idx
+        self.dataset_len = len(fnames_list)
+        # opened lazily (DataLoader workers each open their own handles)
+        self._asmk_hf = None
+        self._lafs_hf = None
+        self._hw_hf   = None
+
+    def _open(self):
+        self._asmk_hf = h5py.File(self.asmk_h5_path, 'r')
+        self._lafs_hf = h5py.File(os.path.join(self.local_feature_dir, 'lafs.h5'), 'r')
+        self._hw_hf   = h5py.File(os.path.join(self.local_feature_dir, 'hw.h5'),   'r')
+
+    def __getitem__(self, index):
+        key = self.fname_list[index]
+        img_idx = self.fname_to_idx[key]
+        if self._asmk_hf is None:
+            self._open()
+        start = int(self._asmk_hf['offsets'][img_idx])
+        end   = int(self._asmk_hf['offsets'][img_idx + 1])
+        # forward_local already returns gathered top-K features; no re-indexing needed
+        descs = torch.from_numpy(self._asmk_hf['feat'][start:end])  # (n_kpts, D)
+        lafs       = torch.from_numpy(self._lafs_hf[key][...]).float()
+        hw         = torch.from_numpy(self._hw_hf[key][...])
+        return descs, lafs, hw, key
+
+    def __len__(self):
+        return self.dataset_len
