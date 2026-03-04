@@ -281,7 +281,7 @@ if __name__ == "__main__":
     parser.add_argument('--global_desc_dir', type=str, default='./tmp/global_desc')
     parser.add_argument('--use_diffusion',  action='store_true')
     parser.add_argument('--global_features', type=str, default='dinosalad',
-                        choices=['dinosalad', 'siglip', 'mast3r_asmk'])
+                        choices=['dinosalad', 'siglip', 'mast3r_asmk', 'sift_asmk'])
     parser.add_argument('--mast3r_dir', type=str, default='../mast3r',
                         help='Path to cloned naver/mast3r repo (used with --global_features=mast3r_asmk)')
     parser.add_argument('--mast3r_retrieval_model', type=str,
@@ -302,6 +302,12 @@ if __name__ == "__main__":
     parser.add_argument('--global_desc_batch_size', type=int, default=4)
     parser.add_argument('--local_desc_batch_size', type=int, default=4)
     parser.add_argument('--matching_method', type=str, default='snn')
+    # SIFT+ASMK options (used when --global_features=sift_asmk)
+    parser.add_argument('--sift_asmk_vocab_size', type=int, default=65536)
+    parser.add_argument('--sift_asmk_sample_n', type=int, default=500000)
+    parser.add_argument('--sift_asmk_topk', type=int, default=1000)
+    parser.add_argument('--hqe_topk_verify', type=int, default=50)
+    parser.add_argument('--hqe_max_iters', type=int, default=2)
     args = parser.parse_args()
     config = get_default_config()
     for k, v in vars(args).items():
