@@ -159,8 +159,9 @@ class SIFTASMKRetrieval:
         Also collects per-image scale histograms for Phase 2.
         """
         assert self.asmk_method is not None, "Call train_vocabulary() first."
-        self.fnames = list(fnames)
-        n_images = len(fnames)
+        valid_fnames = self._filter_valid_fnames(feature_dir, list(fnames))
+        self.fnames = valid_fnames
+        n_images = len(valid_fnames)
         scale_hists = np.zeros((n_images, N_SCALE_BINS), dtype=np.float32)
 
         print(f"Building IVF for {n_images} images...")
@@ -169,7 +170,7 @@ class SIFTASMKRetrieval:
 
         with h5py.File(os.path.join(feature_dir, 'descriptors.h5'), 'r') as f_desc, \
              h5py.File(os.path.join(feature_dir, 'lafs.h5'), 'r') as f_laf:
-            for img_idx, fname in enumerate(tqdm(fnames, desc="Loading SIFT")):
+            for img_idx, fname in enumerate(tqdm(valid_fnames, desc="Loading SIFT")):
                 descs = f_desc[fname][...].astype(np.float32)
                 if descs.dtype == np.uint8:
                     descs = descs.astype(np.float32) / 512.0
@@ -576,13 +577,32 @@ class SIFTASMKRetrieval:
 
         return best
 
+    @staticmethod
+    def _filter_valid_fnames(feature_dir: str, fnames: list) -> list:
+        """Return only fnames that have a corresponding entry in descriptors.h5."""
+        h5_path = os.path.join(feature_dir, 'descriptors.h5')
+        valid = []
+        skipped = 0
+        with h5py.File(h5_path, 'r') as f:
+            for fname in fnames:
+                try:
+                    f[fname]          # just check existence — no data read
+                    valid.append(fname)
+                except KeyError:
+                    skipped += 1
+        if skipped:
+            print(f"[sift_asmk] Skipped {skipped} images missing from descriptors.h5 "
+                  f"(likely zero keypoints during extraction)")
+        return valid
+
     def _load_sample_descs(self, feature_dir: str, fnames: list,
                             sample_n: int) -> np.ndarray:
         """Load a random sample of descriptors from h5 for codebook training."""
+        valid_fnames = self._filter_valid_fnames(feature_dir, fnames)
         all_descs = []
         with h5py.File(os.path.join(feature_dir, 'descriptors.h5'), 'r') as f:
-            n_per_img = max(1, sample_n // len(fnames))
-            for fname in tqdm(fnames, desc="Sampling descriptors"):
+            n_per_img = max(1, sample_n // len(valid_fnames))
+            for fname in tqdm(valid_fnames, desc="Sampling descriptors"):
                 d = f[fname][...]
                 if d.dtype == np.uint8:
                     d = d.astype(np.float32) / 512.0
