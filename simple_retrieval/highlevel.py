@@ -166,8 +166,12 @@ class SimpleRetrieval:
 
         if self.config.get("global_features") == "sift_asmk":
             # SIFT+ASMK: local features serve as both global retrieval and local reranking.
+            # Always named sift_<N>[_uint8] regardless of config['local_features'].
             # Step 1: ensure SIFT features are extracted.
-            local_feat_dir = self.get_local_feature_dir(img_dir)
+            sift_desc_name = f"sift_{self.config['num_local_features']}"
+            if self.config.get("quantize_local_desc", False):
+                sift_desc_name += "_uint8"
+            local_feat_dir = os.path.join(self.config['local_desc_dir'], sift_desc_name)
             os.makedirs(local_feat_dir, exist_ok=True)
             sentinel = os.path.join(local_feat_dir, 'descriptors.h5')
             if not os.path.exists(sentinel) or self.config["force_recache"]:
@@ -245,8 +249,12 @@ class SimpleRetrieval:
         # Placeholder function for creating a local descriptor index
         self.local_feature_dir = self.get_local_feature_dir(img_dir)
         t=time()
-        # sift_asmk already extracts SIFT in create_global_descriptor_index
+        # sift_asmk extracts SIFT (always named sift_<N>) in create_global_descriptor_index
         if self.config.get("global_features") == "sift_asmk":
+            sift_desc_name = f"sift_{self.config['num_local_features']}"
+            if self.config.get("quantize_local_desc", False):
+                sift_desc_name += "_uint8"
+            self.local_feature_dir = os.path.join(self.config['local_desc_dir'], sift_desc_name)
             print(f"SIFT features managed by sift_asmk pipeline, already in {self.local_feature_dir}")
             return
         sentinel = 'keypoints.h5' if self.config["local_features"] == "mast3r" else 'descriptors.h5'
