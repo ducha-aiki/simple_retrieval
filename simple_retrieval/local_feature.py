@@ -8,7 +8,7 @@ from tqdm import tqdm
 import numpy as np
 import kornia.feature as KF
 from kornia_moons.feature import laf_from_opencv_SIFT_kpts
-from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset
+from simple_retrieval.pile_of_garbage import CustomImageFolderFromFileList, collate_with_string, no_collate, H5LocalFeatureDataset, H5MASt3RLocalFeatureDataset
 from simple_retrieval.xfeat import XFeat, LighterGlue
 from simple_retrieval.clidd import CLIDD
 from simple_retrieval.mast3r_feature import detect_mast3r_dir, detect_mast3r_single  # noqa: F401
@@ -239,7 +239,7 @@ def get_matching_keypoints(kp1, kp2, idxs):
     mkpts2 = kp2[idxs[:, 1]]
     return mkpts1, mkpts2
 
-def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_method='smnn' , feature_name='xfeat', device=torch.device('cpu')):
+def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_method='smnn', feature_name='xfeat', device=torch.device('cpu'), **kwargs):
     dtype = torch.float16 if 'cuda' in str(device) else torch.float32
     matching_keypoints=[]
     out_hw2 = []
@@ -264,7 +264,11 @@ def match_query_to_db(query_desc, query_laf, query_hw, db_dir, fnames, matching_
     elif matching_method =='lightglue':
         if feature_name =='xfeat':
             matcher = LighterGlue(device=device).eval().to(dtype)
-    shortlist_local_feature_dataset = H5LocalFeatureDataset(db_dir, fnames)
+    if feature_name == 'mast3r':
+        shortlist_local_feature_dataset = H5MASt3RLocalFeatureDataset(
+            db_dir, kwargs['mast3r_asmk_h5'], fnames, kwargs['fname_to_idx'])
+    else:
+        shortlist_local_feature_dataset = H5LocalFeatureDataset(db_dir, fnames)
     kp1 = K.feature.get_laf_center(query_laf).reshape(-1, 2)
     batch_size = 2
     if len(kp1) <= 4096:
