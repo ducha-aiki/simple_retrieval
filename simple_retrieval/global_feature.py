@@ -384,7 +384,9 @@ def get_dinov2salad(device='cpu', dtype=torch.float32):
         }
     salad = SALAD(**agg_config).eval()
     model = SimpleDINOSALAD(dino, salad)
-    model.load_state_dict(torch.load('dino_salad.ckpt', map_location=torch.device('cpu')))
+    model.load_state_dict(torch.hub.load_state_dict_from_url(
+        'https://github.com/serizba/salad/releases/download/v1.0.0/dino_salad.ckpt',
+        map_location=torch.device('cpu')))
     model.eval()
     model=model.to(device=device, dtype=dtype)
     return model
